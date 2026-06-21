@@ -7,3 +7,5 @@ data/raw/*
 .DS_Store
 .ipynb_checkpoints/
 *.db
+data/synthetic/*
+!data/synthetic/.gitkeep
