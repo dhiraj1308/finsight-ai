@@ -22,7 +22,7 @@ FastAPI, Streamlit
 
 ## Roadmap
 - [x] Day 1: Project setup
-- [ ] Week 1: Data pipeline (synthetic data + statement parsing)
+- [x] Week 1: Data pipeline (synthetic data + statement parsing + SQLite storage)
 - [ ] Week 2: Categorization, anomaly detection, forecasting
 - [ ] Week 3: RAG + agentic layer
 - [ ] Week 4: API, frontend, deployment
