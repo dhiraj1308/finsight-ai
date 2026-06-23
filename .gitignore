@@ -9,3 +9,5 @@ data/raw/*
 *.db
 data/synthetic/*
 !data/synthetic/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
