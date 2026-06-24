@@ -14,5 +14,3 @@ pytest==8.0.2
 pytest-mock==3.12.0
 reportlab==4.1.0
 pypdf==4.1.0
-prophet==1.1.5
-statsmodels==0.14.1
