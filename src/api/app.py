@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import sys
 from pathlib import Path
 from typing import Optional
 
@@ -41,7 +40,6 @@ app.add_middleware(
 
 
 def _get_components():
-    """Lazy-initialize all ML components using settings."""
     from config import get_settings
     settings = get_settings()
 
@@ -77,13 +75,9 @@ def _txn_to_dto(txn) -> TransactionDTO:
 
 @app.post("/ingest", response_model=IngestResponse)
 async def ingest(file: UploadFile = File(...)):
-    """Upload a PDF or CSV bank statement for ingestion."""
     filename = file.filename or ""
     if not (filename.endswith(".csv") or filename.endswith(".pdf")):
-        raise HTTPException(
-            status_code=422,
-            detail="Only PDF and CSV files are supported.",
-        )
+        raise HTTPException(status_code=422, detail="Only PDF and CSV files are supported.")
 
     store, vector_store, categorizer, anomaly_detector, _ = _get_components()
 
@@ -101,10 +95,7 @@ async def ingest(file: UploadFile = File(...)):
         transactions, summary = parser.parse(tmp_path)
 
         if summary.file_errors:
-            raise HTTPException(
-                status_code=422,
-                detail=f"File error: {summary.file_errors[0]}",
-            )
+            raise HTTPException(status_code=422, detail=f"File error: {summary.file_errors[0]}")
 
         for txn in transactions:
             txn.source_file = filename
@@ -128,13 +119,12 @@ async def ingest(file: UploadFile = File(...)):
         except Exception as e:
             logger.warning(f"Anomaly detection failed: {e}")
 
-        return IngestResponse(
-            ingested=inserted,
-            skipped=skipped,
-            warnings=summary.warnings[:10],
-        )
+        return IngestResponse(ingested=inserted, skipped=skipped, warnings=summary.warnings[:10])
     finally:
-        tmp_path.unlink(missing_ok=True)
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except PermissionError:
+            logger.warning(f"Could not delete temp file (locked): {tmp_path}")
 
 
 @app.get("/transactions", response_model=list[TransactionDTO])
@@ -143,16 +133,12 @@ async def get_transactions(
     end_date: Optional[str] = Query(None),
     category: Optional[str] = Query(None),
 ):
-    """Get transactions with optional date range and category filters."""
     store, _, _, _, _ = _get_components()
 
     try:
         if start_date and end_date:
             from datetime import date
-            txns = store.query_by_date_range(
-                date.fromisoformat(start_date),
-                date.fromisoformat(end_date),
-            )
+            txns = store.query_by_date_range(date.fromisoformat(start_date), date.fromisoformat(end_date))
         elif category:
             txns = store.query_by_category(category)
         else:
@@ -165,18 +151,13 @@ async def get_transactions(
 
 @app.get("/anomalies", response_model=list[TransactionDTO])
 async def get_anomalies():
-    """Get all anomalous transactions ordered by anomaly score descending."""
     store, _, _, anomaly_detector, _ = _get_components()
     anomalies = anomaly_detector.get_anomalies(store)
     return [_txn_to_dto(t) for t in anomalies]
 
 
 @app.get("/forecast/{category}", response_model=ForecastDTO)
-async def get_forecast(
-    category: str,
-    days: int = Query(default=30, ge=1, le=365),
-):
-    """Get spending forecast for a category."""
+async def get_forecast(category: str, days: int = Query(default=30, ge=1, le=365)):
     store, _, _, _, forecaster = _get_components()
     try:
         forecast = forecaster.forecast_category(category, days, store)
@@ -187,12 +168,7 @@ async def get_forecast(
         category=forecast.category,
         horizon_days=forecast.horizon_days,
         points=[
-            ForecastPointDTO(
-                date=p.date,
-                yhat=p.yhat,
-                yhat_lower=p.yhat_lower,
-                yhat_upper=p.yhat_upper,
-            )
+            ForecastPointDTO(date=p.date, yhat=p.yhat, yhat_lower=p.yhat_lower, yhat_upper=p.yhat_upper)
             for p in forecast.points
         ],
     )
@@ -200,18 +176,28 @@ async def get_forecast(
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    """Ask a natural language question about your finances."""
-    # Agent implementation comes in Task 14
-    # For now return a placeholder that confirms the endpoint works
-    return ChatResponse(
-        answer=(
-            f"Agent not yet configured. Your question was: '{request.message}'. "
-            f"Session: {request.session_id}"
-        )
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    from agent.agent import FinancialAgent
+    from anomaly.anomaly_detector import AnomalyDetector
+    from forecasting.forecaster import Forecaster
+
+    store, vector_store, _, _, _ = _get_components()
+    anomaly_detector = AnomalyDetector()
+    forecaster = Forecaster()
+
+    agent = FinancialAgent(
+        store=store,
+        vector_store=vector_store,
+        forecaster=forecaster,
+        anomaly_detector=anomaly_detector,
     )
+
+    answer = agent.chat(message=request.message, session_id=request.session_id)
+    return ChatResponse(answer=answer)
 
 
 @app.get("/health")
 async def health():
-    """Health check endpoint."""
     return {"status": "ok", "service": "FinSight AI"}
