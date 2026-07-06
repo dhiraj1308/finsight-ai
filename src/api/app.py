@@ -7,7 +7,6 @@ from typing import Optional
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-from anomaly.anomaly_detector import AnomalyDetector
 from api.models import (
     ChatRequest,
     ChatResponse,
@@ -16,12 +15,11 @@ from api.models import (
     IngestResponse,
     TransactionDTO,
 )
-from api.vector_store import VectorStore
-from categorization.categorizer import Categorizer
-from forecasting.forecaster import Forecaster
+
+
+
 from ingestion.csv_parser import CSVParser
 from ingestion.pdf_parser import PDFParser
-from ingestion.transaction_store import TransactionStore
 
 logger = logging.getLogger(__name__)
 
@@ -39,24 +37,22 @@ app.add_middleware(
 )
 
 
+from api.dependencies import create_components
+
+
 def _get_components():
     from config import get_settings
+
     settings = get_settings()
+    components = create_components(settings)
 
-    store = TransactionStore(settings.SQLITE_DB_PATH)
-    vector_store = VectorStore(
-        persist_dir=settings.CHROMA_PERSIST_DIR,
-        embedding_model_name=settings.EMBEDDING_MODEL_NAME,
+    return (
+        components.store,
+        components.vector_store,
+        components.categorizer,
+        components.anomaly_detector,
+        components.forecaster,
     )
-    categorizer = Categorizer()
-    model_path = Path("data/processed/categorizer.joblib")
-    if model_path.exists():
-        categorizer.load(model_path)
-
-    anomaly_detector = AnomalyDetector()
-    forecaster = Forecaster()
-
-    return store, vector_store, categorizer, anomaly_detector, forecaster
 
 
 def _txn_to_dto(txn) -> TransactionDTO:
