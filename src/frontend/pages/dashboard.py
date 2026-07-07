@@ -8,8 +8,8 @@ import streamlit as st
 
 from frontend.services.api import APIClient
 
-# Columns shown in the recent-transactions table
-_TXN_COLUMNS = ["date", "merchant", "amount", "category", "is_anomaly"]
+# Ordered columns for the recent-transactions table
+TRANSACTION_COLUMNS = ["date", "merchant", "category", "amount"]
 
 
 def _check_health(client: APIClient) -> None:
@@ -25,7 +25,9 @@ def _kpi_cards(transactions: list[dict[str, Any]], anomalies: list[dict[str, Any
     """Render three KPI metric cards in equal-width columns."""
     total_txns = len(transactions)
     total_anomalies = len(anomalies)
-    unique_categories = len({t["category"] for t in transactions}) if transactions else 0
+    unique_categories = len(
+        {t.get("category") for t in transactions if t.get("category")}
+    )
 
     col1, col2, col3 = st.columns(3)
     col1.metric("Total Transactions", total_txns)
@@ -41,15 +43,16 @@ def _recent_transactions(transactions: list[dict[str, Any]]) -> None:
         st.info("No transactions found. Upload a statement to get started.")
         return
 
-    df = pd.DataFrame(transactions)[_TXN_COLUMNS].head(10)
-    df["date"] = pd.to_datetime(df["date"]).dt.date
+    df = pd.DataFrame(transactions)
+    available_cols = [c for c in TRANSACTION_COLUMNS if c in df.columns]
+    df = df.sort_values("date", ascending=False)[available_cols].head(10)
+    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
     df.rename(
         columns={
             "date": "Date",
             "merchant": "Merchant",
-            "amount": "Amount (£)",
             "category": "Category",
-            "is_anomaly": "Anomaly",
+            "amount": "Amount",
         },
         inplace=True,
     )
@@ -57,12 +60,19 @@ def _recent_transactions(transactions: list[dict[str, Any]]) -> None:
 
 
 def _quick_actions() -> None:
-    """Render a Quick Actions button row."""
+    """Render a Quick Actions button row.
+
+    Buttons will navigate to their respective pages using st.switch_page()
+    once the remaining frontend pages are fully implemented.
+    """
     st.subheader("Quick Actions")
     col1, col2, col3, _ = st.columns([1, 1, 1, 3])
-    col1.button("📤 Upload Statement", use_container_width=True)
-    col2.button("📈 Forecast", use_container_width=True)
-    col3.button("🤖 AI Chat", use_container_width=True)
+    if col1.button("📤 Upload Statement", use_container_width=True):
+        st.info("Coming soon")
+    if col2.button("📈 Forecast", use_container_width=True):
+        st.info("Coming soon")
+    if col3.button("🤖 AI Chat", use_container_width=True):
+        st.info("Coming soon")
 
 
 def render(client: APIClient) -> None:
