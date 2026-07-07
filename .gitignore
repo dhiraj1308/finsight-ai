@@ -11,3 +11,4 @@ data/synthetic/*
 !data/synthetic/.gitkeep
 data/processed/*
 !data/processed/.gitkeep
+venv_backup/
