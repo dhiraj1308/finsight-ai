@@ -32,13 +32,28 @@ _PAGES = {
     "Settings": settings,
 }
 
-if "api_client" not in st.session_state:
-    st.session_state.api_client = APIClient()
 
-client: APIClient = st.session_state.api_client
+def main() -> None:
+    """Initialise session state, render sidebar, and dispatch to the active page."""
+    if "api_client" not in st.session_state:
+        st.session_state.api_client = APIClient()
 
-with st.sidebar:
-    st.title("FinSight AI")
-    selection = st.radio("Navigation", list(_PAGES.keys()), label_visibility="collapsed")
+    client: APIClient = st.session_state.api_client
 
-_PAGES[selection].render(client)
+    with st.sidebar:
+        st.title("💰 FinSight AI")
+        st.caption("Personal Finance Intelligence")
+        selection = st.radio(
+            "Navigation", list(_PAGES.keys()), label_visibility="collapsed"
+        )
+
+    try:
+        _PAGES[selection].render(client)
+    except RuntimeError as exc:
+        st.error(str(exc))
+    except Exception as exc:  # noqa: BLE001
+        st.exception(exc)
+
+
+if __name__ == "__main__":
+    main()
