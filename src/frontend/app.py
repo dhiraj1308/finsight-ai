@@ -1,9 +1,18 @@
 """Entry point for the FinSight AI Streamlit frontend."""
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# Ensure src/ is on the path so `frontend`, `api`, etc. are importable
+# regardless of which directory streamlit is launched from.
+_src = Path(__file__).resolve().parent.parent
+if str(_src) not in sys.path:
+    sys.path.insert(0, str(_src))
+
 import streamlit as st
 
-from frontend.pages import (
+from frontend.views import (
     analytics,
     anomalies,
     chat,
@@ -32,20 +41,34 @@ _PAGES = {
     "Settings": settings,
 }
 
+_PAGE_NAMES = list(_PAGES.keys())
+
 
 def main() -> None:
     """Initialise session state, render sidebar, and dispatch to the active page."""
     if "api_client" not in st.session_state:
         st.session_state.api_client = APIClient()
 
+    if "page" in st.session_state and st.session_state["page"] in _PAGES:
+        default_index = _PAGE_NAMES.index(st.session_state["page"])
+    else:
+        default_index = 0
+
     client: APIClient = st.session_state.api_client
 
     with st.sidebar:
         st.title("💰 FinSight AI")
         st.caption("Personal Finance Intelligence")
+        st.divider()
+
         selection = st.radio(
-            "Navigation", list(_PAGES.keys()), label_visibility="collapsed"
+            "Navigation",
+            _PAGE_NAMES,
+            index=default_index,
+            label_visibility="collapsed",
         )
+
+    st.session_state["page"] = selection
 
     try:
         _PAGES[selection].render(client)

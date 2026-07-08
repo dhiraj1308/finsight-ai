@@ -8,7 +8,7 @@ from typing import Union
 import numpy as np
 import pandas as pd
 
-from ingestion.transaction_store import TransactionStore
+from src.ingestion.transaction_store import TransactionStore
 
 logger = logging.getLogger(__name__)
 

@@ -7,6 +7,7 @@ import pandas as pd
 import streamlit as st
 
 from frontend.services.api import APIClient
+from frontend.utils import navigate_to, page_header
 
 # Ordered columns for the recent-transactions table
 TRANSACTION_COLUMNS = ["date", "merchant", "category", "amount"]
@@ -21,7 +22,10 @@ def _check_health(client: APIClient) -> None:
         st.error("🔴 Backend Offline")
 
 
-def _kpi_cards(transactions: list[dict[str, Any]], anomalies: list[dict[str, Any]]) -> None:
+def _kpi_cards(
+    transactions: list[dict[str, Any]],
+    anomalies: list[dict[str, Any]],
+) -> None:
     """Render three KPI metric cards in equal-width columns."""
     total_txns = len(transactions)
     total_anomalies = len(anomalies)
@@ -60,26 +64,26 @@ def _recent_transactions(transactions: list[dict[str, Any]]) -> None:
 
 
 def _quick_actions() -> None:
-    """Render a Quick Actions button row.
+    """Render a Quick Actions button row that navigates to the target page.
 
-    Buttons will navigate to their respective pages using st.switch_page()
-    once the remaining frontend pages are fully implemented.
+    Navigation is handled by ``navigate_to()``, which updates session state
+    and triggers a rerun so ``app.py`` re-dispatches to the correct page.
     """
     st.subheader("Quick Actions")
     col1, col2, col3, _ = st.columns([1, 1, 1, 3])
+
     if col1.button("📤 Upload Statement", use_container_width=True):
-        st.info("Coming soon")
+        navigate_to("Upload")
     if col2.button("📈 Forecast", use_container_width=True):
-        st.info("Coming soon")
+        navigate_to("Forecast")
     if col3.button("🤖 AI Chat", use_container_width=True):
-        st.info("Coming soon")
+        navigate_to("Chat")
 
 
 def render(client: APIClient) -> None:
     """Render the FinSight AI dashboard page."""
-    st.title("💰 FinSight AI Dashboard")
+    page_header("💰 FinSight AI", subtitle="Personal Finance Intelligence Dashboard")
     _check_health(client)
-    st.divider()
 
     try:
         transactions = client.get_transactions()

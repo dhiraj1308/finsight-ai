@@ -7,7 +7,7 @@ from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_groq import ChatGroq
 
-from agent.tools import create_tools
+from src.agent.tools import create_tools
 
 logger = logging.getLogger(__name__)
 

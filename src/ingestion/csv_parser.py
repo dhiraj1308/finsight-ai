@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 
-from domain import Transaction
+from src.domain import Transaction
 
 
 @dataclass
@@ -18,15 +18,37 @@ class CSVParser:
     """Parses bank/credit card statement CSV files into Transaction records."""
 
     COLUMN_ALIASES: dict[str, str] = {
+        # merchant aliases
         "description": "merchant",
         "narration": "merchant",
         "details": "merchant",
+        "transaction details": "merchant",
+        "particulars": "merchant",
+        "remarks": "merchant",
+        "transaction description": "merchant",
+        "tran description": "merchant",
+        "tran. description": "merchant",
+        "chq./ref. no./narration": "merchant",
+        # amount aliases
         "debit": "amount",
         "withdrawal": "amount",
         "charge": "amount",
+        "debit amount": "amount",
+        "transaction amount": "amount",
+        "amount (inr)": "amount",
+        "amount(inr)": "amount",
+        "inr amount": "amount",
+        "dr amount": "amount",
+        "dr": "amount",
+        # date aliases
         "transaction date": "date",
         "posted date": "date",
         "trans. date": "date",
+        "tran date": "date",
+        "tran. date": "date",
+        "txn date": "date",
+        "value date": "date",
+        "posting date": "date",
     }
 
     def _canonical_field_name(self, raw_column_name: str) -> str:
@@ -39,7 +61,18 @@ class CSVParser:
     def _parse_date(self, raw_value: str) -> date:
         """Tries common date formats; raises ValueError if none match."""
         raw_value = raw_value.strip()
-        for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%m-%d-%Y"):
+        for fmt in (
+            "%Y-%m-%d",
+            "%m/%d/%Y",
+            "%d/%m/%Y",
+            "%m-%d-%Y",
+            "%d-%m-%Y",
+            "%d %b %Y",   # 08 Jul 2025  (Axis Bank)
+            "%d/%b/%Y",   # 08/Jul/2025
+            "%d-%b-%Y",   # 08-Jul-2025
+            "%d %B %Y",   # 08 July 2025
+            "%d-%b-%y",   # 08-Jul-25
+        ):
             try:
                 return datetime.strptime(raw_value, fmt).date()
             except ValueError:
@@ -48,7 +81,9 @@ class CSVParser:
 
     def _parse_amount(self, raw_value: str) -> float:
         """Parses a numeric amount, stripping common currency symbols/commas."""
-        cleaned = raw_value.strip().replace("$", "").replace(",", "")
+        cleaned = raw_value.strip().replace("₹", "").replace("$", "").replace(",", "").replace(" ", "")
+        # Handle CR/DR suffix used by some banks
+        cleaned = cleaned.rstrip("CRcr").rstrip("DRdr").strip()
         return float(cleaned)
 
     def parse(self, file_path: Path) -> tuple[list[Transaction], ParseSummary]:

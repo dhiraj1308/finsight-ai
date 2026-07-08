@@ -15,7 +15,25 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-BASE_URL = "http://127.0.0.1:8000"
+import os
+
+BASE_URL = os.getenv("FINSIGHT_API_URL", "http://127.0.0.1:8000")
+
+
+class PasswordRequiredError(Exception):
+    """Raised when the backend returns error_code='PASSWORD_REQUIRED'."""
+
+    def __init__(self, filename: str) -> None:
+        self.filename = filename
+        super().__init__(f"PDF is password-protected: {filename}")
+
+
+class PasswordIncorrectError(Exception):
+    """Raised when the backend returns error_code='PASSWORD_INCORRECT'."""
+
+    def __init__(self, filename: str) -> None:
+        self.filename = filename
+        super().__init__(f"Incorrect password for: {filename}")
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +107,7 @@ class APIClient:
         json: Optional[dict[str, Any]] = None,
         files: Optional[dict[str, Any]] = None,
         timeout: int = _DEFAULT_TIMEOUT,
+        filename: str = "",
     ) -> Any:
         """Perform a POST request and return the decoded JSON body."""
         url = self._url(path)
@@ -108,20 +127,30 @@ class APIClient:
         except requests.RequestException as exc:
             raise RuntimeError(f"Unexpected network error: {exc}") from exc
 
-        self._raise_for_status(response)
+        self._raise_for_status(response, filename=filename)
         return response.json()
 
     @staticmethod
-    def _raise_for_status(response: requests.Response) -> None:
-        """Translate non-2xx responses into a :class:`RuntimeError`."""
+    def _raise_for_status(response: requests.Response, filename: str = "") -> None:
+        """Translate non-2xx responses into a typed or generic :class:`RuntimeError`."""
         if response.ok:
             return
 
-        detail: str
         try:
             body = response.json()
-            detail = body.get("detail") or response.text
         except ValueError:
+            body = {}
+
+        error_code = body.get("error_code") if isinstance(body, dict) else None
+        if response.status_code == 422 and error_code == "PASSWORD_REQUIRED":
+            raise PasswordRequiredError(filename)
+        if response.status_code == 422 and error_code == "PASSWORD_INCORRECT":
+            raise PasswordIncorrectError(filename)
+
+        detail: str
+        if isinstance(body, dict):
+            detail = body.get("detail") or response.text or response.reason or "unknown error"
+        else:
             detail = response.text or response.reason or "unknown error"
 
         raise RuntimeError(
@@ -148,16 +177,38 @@ class APIClient:
         """
         return self._get("/health")
 
-    def upload_statement(self, file_path: str | Path) -> dict[str, Any]:
+    def upload_statement(
+        self,
+        file_path: str | Path | None = None,
+        *,
+        file_bytes: bytes | None = None,
+        filename: str | None = None,
+        password: str | None = None,
+    ) -> dict[str, Any]:
         """
         Upload a bank statement (CSV or PDF) to the ``/ingest`` endpoint.
 
-        The file is streamed as ``multipart/form-data``.
+        Two calling conventions are supported:
+
+        1. **Path-based** (original): ``upload_statement(file_path)``
+           — reads the file from disk and derives the filename automatically.
+        2. **In-memory**: ``upload_statement(file_bytes=b"...", filename="x.pdf", password="pw")``
+           — uses the supplied bytes directly (for re-submission after a
+           password prompt, where the file is already buffered in memory).
+
+        The file is streamed as ``multipart/form-data``.  When a *password* is
+        provided it is transmitted as a form field — never in the URL.
 
         Parameters
         ----------
         file_path:
-            Absolute or relative path to the statement file.
+            Absolute or relative path to the statement file (path-based call).
+        file_bytes:
+            Raw file bytes (in-memory call, keyword-only).
+        filename:
+            Original filename, required when using *file_bytes* (keyword-only).
+        password:
+            Optional PDF decryption password (keyword-only).
 
         Returns
         -------
@@ -169,20 +220,37 @@ class APIClient:
         ------
         FileNotFoundError
             If *file_path* does not exist on disk.
+        PasswordRequiredError
+            If the PDF is encrypted and no password was supplied.
+        PasswordIncorrectError
+            If the supplied password is wrong.
         RuntimeError
             On network or server errors.
         """
-        path = Path(file_path)
-        if not path.exists():
-            raise FileNotFoundError(f"Statement file not found: {path}")
+        if file_path is not None:
+            path = Path(file_path)
+            if not path.exists():
+                raise FileNotFoundError(f"Statement file not found: {path}")
+            data = path.read_bytes()
+            name = path.name
+        elif file_bytes is not None and filename is not None:
+            data = file_bytes
+            name = filename
+        else:
+            raise ValueError(
+                "Provide either file_path or both file_bytes and filename."
+            )
 
-        with path.open("rb") as fh:
-            files = {"file": (path.name, fh, _mime_type(path))}
-            result = self._post("/ingest", files=files, timeout=_UPLOAD_TIMEOUT)
+        mime = _mime_type(Path(name))
+        files: dict[str, Any] = {"file": (name, data, mime)}
+        if password is not None and password != "":
+            files["password"] = (None, password)
+
+        result = self._post("/ingest", files=files, timeout=_UPLOAD_TIMEOUT, filename=name)
 
         logger.info(
             "Ingested %s: %d inserted, %d skipped.",
-            path.name,
+            name,
             result.get("ingested", 0),
             result.get("skipped", 0),
         )

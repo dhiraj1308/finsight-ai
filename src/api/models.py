@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -31,10 +31,16 @@ class ForecastDTO(BaseModel):
     points: list[ForecastPointDTO]
 
 
+class PasswordErrorResponse(BaseModel):
+    error_code: Literal["PASSWORD_REQUIRED", "PASSWORD_INCORRECT"]
+    detail: str
+
+
 class IngestResponse(BaseModel):
     ingested: int
     skipped: int
     warnings: list[str] = []
+    error_code: str | None = None
 
 
 class ChatRequest(BaseModel):

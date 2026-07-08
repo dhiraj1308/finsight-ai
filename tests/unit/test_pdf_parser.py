@@ -20,15 +20,14 @@ def test_parses_valid_pdf_statement_correctly():
     assert txns[0].category == "Groceries"
 
 
-def test_password_protected_pdf_returns_exact_error_message():
+def test_password_protected_pdf_returns_password_required_sentinel():
+    """Without a password, parse() must return the PASSWORD_REQUIRED sentinel (Req 2.3)."""
     parser = PDFParser()
     txns, summary = parser.parse(FIXTURES_DIR / "password_protected.pdf")
 
     assert txns == []
     assert summary.parsed == 0
-    assert summary.file_errors == [
-        "File is password-protected and cannot be read."
-    ]
+    assert summary.file_errors == ["PASSWORD_REQUIRED"]
 
 
 def test_no_transaction_table_returns_exact_error_message():

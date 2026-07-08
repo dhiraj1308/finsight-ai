@@ -2,7 +2,7 @@ import csv
 import io
 from pathlib import Path
 
-from domain import Transaction
+from src.domain import Transaction
 
 
 class PrettyPrinter:

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import logging
@@ -8,7 +8,7 @@ from typing import Optional
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
-from domain import Transaction
+from src.domain import Transaction
 
 logger = logging.getLogger(__name__)
 

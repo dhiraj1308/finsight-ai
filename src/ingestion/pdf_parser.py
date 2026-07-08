@@ -1,12 +1,23 @@
+import io
+import re
 import pdfplumber
 from pdfminer.pdfdocument import PDFPasswordIncorrect
 from pathlib import Path
 
-from domain import Transaction
-from ingestion.csv_parser import ParseSummary, CSVParser
+from src.domain import Transaction
+from .csv_parser import ParseSummary, CSVParser
 
 MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
 MAX_PAGES = 100
+
+# Regex for a date token at the start of a transaction line.
+# Matches: 08/07/2025  08-07-2025  08 Jul 2025  08-Jul-2025  08-Jul-25
+_DATE_RE = re.compile(
+    r"^(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}"
+    r"|\d{1,2}[\s\-\/][A-Za-z]{3}[\s\-\/]\d{2,4})"
+)
+# Regex for a standalone rupee amount (handles Indian commas, optional ₹/$)
+_AMOUNT_RE = re.compile(r"[₹$]?\s*(\d{1,3}(?:,\d{2,3})*(?:\.\d{1,2})?)")
 
 
 class PDFParser:
@@ -17,36 +28,37 @@ class PDFParser:
         # parsers stay consistent — no duplicated alias/date/amount logic.
         self._field_mapper = CSVParser()
 
-    def parse(self, file_path: Path) -> tuple[list[Transaction], ParseSummary]:
-        file_path = Path(file_path)
+    def parse_bytes(
+        self,
+        content: bytes,
+        filename: str,
+        password: str | None = None,
+    ) -> tuple[list[Transaction], ParseSummary]:
+        """Parse PDF from in-memory bytes, optionally decrypting with a password."""
         summary = ParseSummary()
 
-        if not file_path.exists():
-            summary.file_errors.append(f"File not found: {file_path}")
-            return [], summary
-
-        file_size = file_path.stat().st_size
-        if file_size > MAX_FILE_SIZE_BYTES:
+        if len(content) > MAX_FILE_SIZE_BYTES:
             summary.file_errors.append(
-                f"File exceeds maximum size of {MAX_FILE_SIZE_BYTES} bytes: {file_path}"
+                f"File exceeds maximum size of {MAX_FILE_SIZE_BYTES} bytes: {filename}"
             )
             return [], summary
 
         try:
-            pdf = pdfplumber.open(file_path)
+            pdf = pdfplumber.open(io.BytesIO(content), password=password)
         except PDFPasswordIncorrect:
-            summary.file_errors.append(
-                "File is password-protected and cannot be read."
-            )
+            if password is None:
+                summary.file_errors.append("PASSWORD_REQUIRED")
+            else:
+                summary.file_errors.append("PASSWORD_INCORRECT")
             return [], summary
         except Exception:
-            summary.file_errors.append(f"Invalid or corrupt PDF file: {file_path}")
+            summary.file_errors.append(f"Invalid or corrupt PDF file: {filename}")
             return [], summary
 
         with pdf:
             if len(pdf.pages) > MAX_PAGES:
                 summary.file_errors.append(
-                    f"File exceeds maximum page count of {MAX_PAGES}: {file_path}"
+                    f"File exceeds maximum page count of {MAX_PAGES}: {filename}"
                 )
                 return [], summary
 
@@ -131,9 +143,131 @@ class PDFParser:
                         summary.parsed += 1
 
             if not found_any_table and summary.parsed == 0:
+                # No structured tables found — try text-based extraction as fallback
+                # (common in Axis Bank and other Indian bank PDFs)
+                text_transactions, text_summary = self._parse_text_fallback(pdf)
+                if text_transactions:
+                    return text_transactions, text_summary
                 summary.file_errors.append(
                     "No recognizable transaction table found."
                 )
                 return [], summary
 
             return transactions, summary
+
+    def _parse_text_fallback(
+        self, pdf: pdfplumber.PDF
+    ) -> tuple[list[Transaction], ParseSummary]:
+        """Text-based fallback for PDFs where extract_tables() finds nothing.
+
+        Works by scanning each line of raw text for lines that start with a
+        recognisable date token, then extracting the last currency amount on
+        that line (or the next line) as the transaction amount, with everything
+        in between treated as the merchant description.
+
+        This handles Axis Bank credit card statements and similar Indian bank
+        PDFs that use a text layout rather than embedded table structures.
+        """
+        summary = ParseSummary()
+        transactions: list[Transaction] = []
+
+        for page_number, page in enumerate(pdf.pages, start=1):
+            text = page.extract_text(layout=True) or ""
+            lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+            i = 0
+            while i < len(lines):
+                line = lines[i]
+                date_match = _DATE_RE.match(line)
+                if not date_match:
+                    i += 1
+                    continue
+
+                raw_date_str = date_match.group(1).strip()
+                try:
+                    parsed_date = self._field_mapper._parse_date(raw_date_str)
+                except ValueError:
+                    i += 1
+                    continue
+
+                # Everything after the date token on the same line is the start
+                # of the description.
+                rest = line[date_match.end():].strip()
+
+                # Find the rightmost amount token in `rest`
+                amount_matches = list(_AMOUNT_RE.finditer(rest))
+
+                if amount_matches:
+                    last_amt = amount_matches[-1]
+                    merchant = rest[: last_amt.start()].strip()
+                    raw_amount = last_amt.group(1)
+                else:
+                    # Amount may be on the next line — look ahead one line
+                    merchant = rest
+                    if i + 1 < len(lines):
+                        next_line = lines[i + 1]
+                        amt_matches_next = list(_AMOUNT_RE.finditer(next_line))
+                        if amt_matches_next:
+                            raw_amount = amt_matches_next[-1].group(1)
+                            i += 1  # consume the lookahead line
+                        else:
+                            i += 1
+                            continue
+                    else:
+                        i += 1
+                        continue
+
+                if not merchant:
+                    i += 1
+                    continue
+
+                try:
+                    parsed_amount = self._field_mapper._parse_amount(raw_amount)
+                except ValueError:
+                    i += 1
+                    continue
+
+                # Skip zero-amount lines (e.g. header rows that matched the regex)
+                if parsed_amount == 0.0:
+                    i += 1
+                    continue
+
+                transactions.append(
+                    Transaction(
+                        date=parsed_date,
+                        merchant=merchant,
+                        amount=parsed_amount,
+                        category="",
+                    )
+                )
+                summary.parsed += 1
+                i += 1
+
+        return transactions, summary
+
+    def parse(
+        self,
+        file_path: Path,
+        password: str | None = None,
+    ) -> tuple[list[Transaction], ParseSummary]:
+        """Parse a PDF from disk, optionally decrypting with a password.
+
+        Handles file I/O and size/existence checks, then delegates all
+        table-extraction logic to parse_bytes().
+        """
+        file_path = Path(file_path)
+        summary = ParseSummary()
+
+        if not file_path.exists():
+            summary.file_errors.append(f"File not found: {file_path}")
+            return [], summary
+
+        file_size = file_path.stat().st_size
+        if file_size > MAX_FILE_SIZE_BYTES:
+            summary.file_errors.append(
+                f"File exceeds maximum size of {MAX_FILE_SIZE_BYTES} bytes: {file_path}"
+            )
+            return [], summary
+
+        content = file_path.read_bytes()
+        return self.parse_bytes(content, file_path.name, password=password)
