@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from src.anomaly.anomaly_detector import AnomalyDetector
-from .vector_store import VectorStore
+from src.api.vector_store import VectorStore
 from src.categorization.categorizer import Categorizer
 from src.forecasting.forecaster import Forecaster
 from src.ingestion.transaction_store import TransactionStore

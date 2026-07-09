@@ -18,8 +18,6 @@ from src.api.models import (
     TransactionDTO,
 )
 
-
-
 from src.ingestion.csv_parser import CSVParser
 from src.ingestion.pdf_parser import PDFParser
 
