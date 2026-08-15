@@ -49,11 +49,6 @@ def main() -> None:
     if "api_client" not in st.session_state:
         st.session_state.api_client = APIClient()
 
-    if "page" in st.session_state and st.session_state["page"] in _PAGES:
-        default_index = _PAGE_NAMES.index(st.session_state["page"])
-    else:
-        default_index = 0
-
     client: APIClient = st.session_state.api_client
 
     with st.sidebar:
@@ -64,7 +59,8 @@ def main() -> None:
         selection = st.radio(
             "Navigation",
             _PAGE_NAMES,
-            index=default_index,
+            index=0,
+            key="nav_radio",
             label_visibility="collapsed",
         )
 
