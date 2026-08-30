@@ -10,8 +10,9 @@ from frontend.services.api import APIClient
 from frontend.utils import page_header
 
 # Session state keys
-_KEY_HISTORY = "chat_history"       # list[dict[str, str]]  role/content pairs
-_KEY_SESSION_ID = "chat_session_id"  # stable UUID for this browser session
+_KEY_HISTORY = "chat_history"           # list[dict[str, str]]  role/content pairs
+_KEY_SESSION_ID = "chat_session_id"     # stable UUID for this browser session
+_KEY_PENDING_PROMPT = "chat_pending_prompt"  # suggestion carried across st.rerun()
 
 # Backend constraint (mirrors ChatRequest field validation)
 _MAX_MESSAGE_CHARS = 2000
@@ -37,6 +38,8 @@ def _ensure_session_state() -> None:
         st.session_state[_KEY_HISTORY] = []
     if _KEY_SESSION_ID not in st.session_state:
         st.session_state[_KEY_SESSION_ID] = str(uuid.uuid4())[:128]
+    if _KEY_PENDING_PROMPT not in st.session_state:
+        st.session_state[_KEY_PENDING_PROMPT] = None
 
 
 def _get_history() -> list[dict[str, str]]:
@@ -61,6 +64,7 @@ def _clear_history() -> None:
     """Erase conversation history and rotate the session ID."""
     st.session_state[_KEY_HISTORY] = []
     st.session_state[_KEY_SESSION_ID] = str(uuid.uuid4())[:128]
+    st.session_state[_KEY_PENDING_PROMPT] = None
 
 
 # ---------------------------------------------------------------------------
@@ -100,17 +104,28 @@ def _render_history(history: list[dict[str, str]]) -> None:
             st.markdown(msg["content"])
 
 
-def _render_suggested_prompts(prompts: list[str]) -> str | None:
+def _render_suggested_prompts(prompts: list[str]) -> None:
     """Render clickable suggestion buttons when the conversation is empty.
 
-    Returns the selected prompt text if a button was clicked, else ``None``.
+    When a button is clicked, the prompt is stored in session state and
+    ``st.rerun()`` is called immediately.  This ensures the widget tree is
+    stable on every render pass — suggestions are either fully shown (empty
+    history) or completely absent (non-empty history).  There is never a
+    partial or non-functional state.
+
+    The clicked prompt is picked up on the next run via
+    ``_KEY_PENDING_PROMPT`` before this function is called again.
     """
     st.markdown("**Suggested questions:**")
     cols = st.columns(len(prompts))
-    for col, prompt in zip(cols, prompts):
-        if col.button(prompt, use_container_width=True):
-            return prompt
-    return None
+    for i, (col, prompt) in enumerate(zip(cols, prompts)):
+        # Stable, unique key: index + first 30 chars of prompt text.
+        # Using an explicit key prevents Streamlit from matching buttons
+        # by position when the column count or prompt list changes.
+        key = f"suggestion_{i}_{prompt[:30]}"
+        if col.button(prompt, key=key, use_container_width=True):
+            st.session_state[_KEY_PENDING_PROMPT] = prompt
+            st.rerun()
 
 
 def _render_clear_button() -> None:
@@ -161,10 +176,12 @@ def render(client: APIClient) -> None:
     # Replay existing conversation
     _render_history(history)
 
-    # Suggested prompts — only visible on an empty conversation
-    prefilled_prompt: str | None = None
+    # Suggested prompts — only rendered on an empty conversation.
+    # Clicking a button stores the prompt in session state and triggers
+    # st.rerun(), so the prompt is consumed on the *next* run below, after
+    # the widget tree has been fully committed.
     if not history:
-        prefilled_prompt = _render_suggested_prompts(_SUGGESTED_PROMPTS)
+        _render_suggested_prompts(_SUGGESTED_PROMPTS)
 
     # Chat input — always at the bottom
     user_input: str | None = st.chat_input(
@@ -172,8 +189,13 @@ def render(client: APIClient) -> None:
         max_chars=_MAX_MESSAGE_CHARS,
     )
 
-    # Resolve the active prompt: typed input takes priority over button click
-    active_prompt: str | None = user_input or prefilled_prompt
+    # Consume any pending suggestion (set by a button click + rerun).
+    # Typed input always takes priority over a pending suggestion.
+    pending: str | None = st.session_state.get(_KEY_PENDING_PROMPT)
+    if pending:
+        st.session_state[_KEY_PENDING_PROMPT] = None  # consume immediately
+
+    active_prompt: str | None = user_input or pending
 
     if not active_prompt:
         return

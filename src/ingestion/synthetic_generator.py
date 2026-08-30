@@ -4,7 +4,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Optional
 
-from src.domain import Transaction
+from domain import Transaction
 
 
 class SyntheticGenerator:

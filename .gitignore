@@ -12,3 +12,5 @@ data/synthetic/*
 data/processed/*
 !data/processed/.gitkeep
 venv_backup/
+
+.hypothesis/

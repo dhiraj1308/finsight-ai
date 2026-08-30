@@ -4,8 +4,8 @@ import numpy as np
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import LabelEncoder
 
-from src.domain import Transaction
-from src.ingestion.transaction_store import TransactionStore
+from domain import Transaction
+from ingestion.transaction_store import TransactionStore
 
 MIN_TRANSACTIONS = 10
 

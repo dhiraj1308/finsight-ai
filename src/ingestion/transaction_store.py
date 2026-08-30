@@ -3,7 +3,7 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
-from src.domain import Transaction
+from domain import Transaction
 
 
 class TransactionStore:

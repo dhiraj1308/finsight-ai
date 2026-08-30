@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 
-from src.domain import Transaction
+from domain import Transaction
 
 
 @dataclass
@@ -29,9 +29,13 @@ class CSVParser:
         "tran description": "merchant",
         "tran. description": "merchant",
         "chq./ref. no./narration": "merchant",
-        # amount aliases
+        "chq no./narration": "merchant",
+        "chq. no./narration": "merchant",
+        "chq no / narration": "merchant",
+        # amount aliases — debit/withdrawal columns
         "debit": "amount",
         "withdrawal": "amount",
+        "withdrawals": "amount",
         "charge": "amount",
         "debit amount": "amount",
         "transaction amount": "amount",
@@ -40,6 +44,19 @@ class CSVParser:
         "inr amount": "amount",
         "dr amount": "amount",
         "dr": "amount",
+        "debit (inr)": "amount",
+        "debit(inr)": "amount",
+        # credit/balance columns — explicitly ignored (map to _ignore)
+        "credit": "_ignore",
+        "deposit": "_ignore",
+        "deposits": "_ignore",
+        "credit amount": "_ignore",
+        "credit (inr)": "_ignore",
+        "credit(inr)": "_ignore",
+        "balance": "_ignore",
+        "closing balance": "_ignore",
+        "available balance": "_ignore",
+        "running balance": "_ignore",
         # date aliases
         "transaction date": "date",
         "posted date": "date",
@@ -49,6 +66,7 @@ class CSVParser:
         "txn date": "date",
         "value date": "date",
         "posting date": "date",
+        "cheque date": "date",
     }
 
     def _canonical_field_name(self, raw_column_name: str) -> str:
@@ -120,7 +138,9 @@ class CSVParser:
 
         for row_index, raw_row in enumerate(reader, start=1):
             canonical_row = {
-                header_map[raw_header]: value for raw_header, value in raw_row.items()
+                header_map[raw_header]: value
+                for raw_header, value in raw_row.items()
+                if header_map.get(raw_header) != "_ignore"
             }
 
             merchant = canonical_row.get("merchant", "").strip()

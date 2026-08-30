@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import numpy as np
-from sentence_transformers import SentenceTransformer
 
-from src.domain import Transaction
+if TYPE_CHECKING:
+    from sentence_transformers import SentenceTransformer
+
+from domain import Transaction
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +25,24 @@ class VectorStore:
         self._persist_dir.mkdir(parents=True, exist_ok=True)
         self._collection_path = self._persist_dir / COLLECTION_FILE
         self._metadata_path = self._persist_dir / METADATA_FILE
-        self._model = SentenceTransformer(embedding_model_name)
+        self._embedding_model_name = embedding_model_name
+        # Lazy: torch / sentence_transformers are NOT imported at module level.
+        # They are loaded on first use so that importing this module does not
+        # trigger torch DLL initialisation before sklearn has loaded its own
+        # native DLLs.  On Windows, sklearn's BLAS/LAPACK DLLs mutate the DLL
+        # loader state in a way that prevents torch's c10.dll from initialising
+        # if it is loaded afterwards (WinError 1114).
+        self._model: Optional["SentenceTransformer"] = None
         self._embeddings: Optional[np.ndarray] = None
         self._metadata: list[dict] = []
         self._load()
+
+    def _get_model(self) -> "SentenceTransformer":
+        """Return the embedding model, loading it on first call (lazy init)."""
+        if self._model is None:
+            from sentence_transformers import SentenceTransformer  # noqa: PLC0415
+            self._model = SentenceTransformer(self._embedding_model_name)
+        return self._model
 
     def _transaction_text(self, transaction: Transaction) -> str:
         return f"{transaction.merchant} {transaction.category} {transaction.amount} {transaction.date}"
@@ -55,7 +71,7 @@ class VectorStore:
 
     def index(self, transaction: Transaction) -> None:
         text = self._transaction_text(transaction)
-        embedding = self._model.encode([text])[0].astype(np.float32)
+        embedding = self._get_model().encode([text])[0].astype(np.float32)
         existing_index = self._find_index(transaction.id)
         metadata_entry = {
             "transaction_id": transaction.id,
@@ -78,7 +94,7 @@ class VectorStore:
     def search(self, query: str, k: int) -> list[Transaction]:
         if self._embeddings is None or len(self._embeddings) == 0:
             return []
-        query_embedding = self._model.encode([query])[0].astype(np.float32)
+        query_embedding = self._get_model().encode([query])[0].astype(np.float32)
         norms = np.linalg.norm(self._embeddings, axis=1, keepdims=True)
         norms = np.where(norms == 0, 1e-10, norms)
         normalized = self._embeddings / norms

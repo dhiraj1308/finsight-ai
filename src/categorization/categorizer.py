@@ -12,7 +12,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder
 from sklearn.feature_extraction.text import TfidfVectorizer
 
-from src.domain import Transaction
+from domain import Transaction
 
 CANONICAL_CATEGORIES = frozenset(
     {

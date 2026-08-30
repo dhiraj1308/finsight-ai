@@ -1,14 +1,24 @@
 from __future__ import annotations
 
 import logging
+import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
+
+# Ensure src/ is on sys.path regardless of how uvicorn is invoked.
+# Works for both:
+#   uvicorn src.api.app:app          (project root, src/ not on path yet)
+#   python -m uvicorn main:app ...   (main.py already adds src/)
+_src_dir = str(Path(__file__).resolve().parent.parent)
+if _src_dir not in sys.path:
+    sys.path.insert(0, _src_dir)
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from src.api.models import (
+from api.models import (
     ChatRequest,
     ChatResponse,
     ForecastDTO,
@@ -17,16 +27,54 @@ from src.api.models import (
     PasswordErrorResponse,
     TransactionDTO,
 )
-
-from src.ingestion.csv_parser import CSVParser
-from src.ingestion.pdf_parser import PDFParser
+# CSVParser and PDFParser are imported lazily inside the /ingest handler
+# to avoid loading pdfplumber/torch at module startup time.
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Application lifespan: load all heavy components ONCE at startup.
+# Storing them in app.state means every request reuses the same objects —
+# no re-loading the 11-second SentenceTransformer model per request.
+# ---------------------------------------------------------------------------
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Load shared components before the server starts accepting requests."""
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    from agent.agent import FinancialAgent
+    from api.dependencies import create_components
+    from config import get_settings
+
+    logger.info("FinSight AI startup: loading components (this may take ~10s)...")
+    settings = get_settings()
+    components = create_components(settings)
+    app.state.components = components
+
+    # Build the agent once so session history persists across requests
+    # and the Groq client is not re-created on every chat call.
+    app.state.agent = FinancialAgent(
+        store=components.store,
+        vector_store=components.vector_store,
+        forecaster=components.forecaster,
+        anomaly_detector=components.anomaly_detector,
+    )
+    logger.info("FinSight AI startup complete.")
+
+    yield  # server is running — handle requests
+
+    # Shutdown: nothing to clean up for now
+    logger.info("FinSight AI shutdown.")
+
 
 app = FastAPI(
     title="FinSight AI",
     description="Agentic Personal Finance Intelligence Platform",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -37,15 +85,31 @@ app.add_middleware(
 )
 
 
-from .dependencies import create_components
-
-
 def _get_components():
-    from src.config import get_settings
+    """Return the shared AppComponents loaded at startup.
+
+    Falls back to creating components on-the-fly if app.state is not
+    yet populated (e.g. during testing without the lifespan context).
+    """
+    from fastapi import Request  # local import to avoid circular at module load
+
+    # Access via app.state — populated once at startup
+    components = getattr(app.state, "components", None)
+    if components is not None:
+        return (
+            components.store,
+            components.vector_store,
+            components.categorizer,
+            components.anomaly_detector,
+            components.forecaster,
+        )
+
+    # Fallback for tests / scripts that call endpoints directly
+    from api.dependencies import create_components
+    from config import get_settings
 
     settings = get_settings()
     components = create_components(settings)
-
     return (
         components.store,
         components.vector_store,
@@ -71,6 +135,9 @@ def _txn_to_dto(txn) -> TransactionDTO:
 
 @app.post("/ingest", response_model=IngestResponse)
 async def ingest(file: UploadFile = File(...), password: str | None = Form(None)):
+    from ingestion.csv_parser import CSVParser
+    from ingestion.pdf_parser import PDFParser
+
     filename = file.filename or ""
     if not (filename.endswith(".csv") or filename.endswith(".pdf")):
         raise HTTPException(status_code=422, detail="Only PDF and CSV files are supported.")
@@ -216,25 +283,26 @@ async def get_forecast(category: str, days: int = Query(default=30, ge=1, le=365
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    from dotenv import load_dotenv
-    load_dotenv()
+    # Use the shared agent cached at startup — preserves session history
+    # and avoids re-creating the Groq client on every request.
+    agent = getattr(app.state, "agent", None)
+    if agent is None:
+        # Fallback: build agent on the fly (test/script usage without lifespan)
+        from agent.agent import FinancialAgent
+        store, vector_store, _, anomaly_detector, forecaster = _get_components()
+        agent = FinancialAgent(
+            store=store,
+            vector_store=vector_store,
+            forecaster=forecaster,
+            anomaly_detector=anomaly_detector,
+        )
 
-    from src.agent.agent import FinancialAgent
-    from src.anomaly.anomaly_detector import AnomalyDetector
-    from src.forecasting.forecaster import Forecaster
+    try:
+        answer = agent.chat(message=request.message, session_id=request.session_id)
+    except Exception as exc:
+        logger.error("/chat error for session=%s: %s", request.session_id, exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Agent error: {exc}") from exc
 
-    store, vector_store, _, _, _ = _get_components()
-    anomaly_detector = AnomalyDetector()
-    forecaster = Forecaster()
-
-    agent = FinancialAgent(
-        store=store,
-        vector_store=vector_store,
-        forecaster=forecaster,
-        anomaly_detector=anomaly_detector,
-    )
-
-    answer = agent.chat(message=request.message, session_id=request.session_id)
     return ChatResponse(answer=answer)
 
 

@@ -4,8 +4,8 @@ import pdfplumber
 from pdfminer.pdfdocument import PDFPasswordIncorrect
 from pathlib import Path
 
-from src.domain import Transaction
-from .csv_parser import ParseSummary, CSVParser
+from domain import Transaction
+from ingestion.csv_parser import ParseSummary, CSVParser
 
 MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
 MAX_PAGES = 100
@@ -90,6 +90,14 @@ class PDFParser:
                                 else None
                             )
                             canonical_field = header_map.get(raw_header, "")
+                            # Skip credit/balance columns — they are not expenses
+                            if canonical_field == "_ignore":
+                                continue
+                            # For duplicate canonical fields (e.g. two "amount"
+                            # columns after mapping), keep the first non-empty
+                            # value so Debit wins over Credit/Balance.
+                            if canonical_field in canonical_row and canonical_row[canonical_field]:
+                                continue
                             canonical_row[canonical_field] = (
                                 str(raw_value).strip() if raw_value else ""
                             )
@@ -128,6 +136,14 @@ class PDFParser:
                                 f"Page {page_number}, row {row_index}: "
                                 f"failing field(s) {', '.join(failing_fields)}"
                             )
+                            continue
+
+                        # Skip sentinel rows like Opening/Closing Balance
+                        if any(kw in merchant.lower() for kw in (
+                            "opening balance", "closing balance",
+                            "brought forward", "carried forward",
+                        )):
+                            summary.skipped += 1
                             continue
 
                         found_any_table = True
@@ -198,9 +214,21 @@ class PDFParser:
                 amount_matches = list(_AMOUNT_RE.finditer(rest))
 
                 if amount_matches:
-                    last_amt = amount_matches[-1]
-                    merchant = rest[: last_amt.start()].strip()
-                    raw_amount = last_amt.group(1)
+                    # Indian bank statements often have: <merchant> <debit> <credit> <balance>
+                    # We want the FIRST non-zero amount (debit), not the last (balance).
+                    chosen_amt = None
+                    for m in amount_matches:
+                        val_str = m.group(1).replace(",", "")
+                        try:
+                            if float(val_str) != 0.0:
+                                chosen_amt = m
+                                break
+                        except ValueError:
+                            continue
+                    if chosen_amt is None:
+                        chosen_amt = amount_matches[0]
+                    merchant = rest[: chosen_amt.start()].strip()
+                    raw_amount = chosen_amt.group(1)
                 else:
                     # Amount may be on the next line — look ahead one line
                     merchant = rest
@@ -220,6 +248,20 @@ class PDFParser:
                 if not merchant:
                     i += 1
                     continue
+
+                # Skip balance/header sentinel lines
+                merchant_lower = merchant.lower()
+                if any(kw in merchant_lower for kw in ("opening balance", "closing balance", "brought forward", "carried forward")):
+                    i += 1
+                    continue
+
+                # If merchant is purely numeric it's a column bleed — skip
+                try:
+                    float(merchant.replace(",", ""))
+                    i += 1
+                    continue
+                except ValueError:
+                    pass
 
                 try:
                     parsed_amount = self._field_mapper._parse_amount(raw_amount)

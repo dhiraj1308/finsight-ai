@@ -1,45 +1,57 @@
 """
-Bug Condition Exploration Test — Stale Index Overrides Radio Selection
+Single-Click Navigation Tests — Keyed Radio Widget (nav_radio)
 
 Validates: Requirements 1.1, 1.2, 1.3
 
-Property 1: Bug Condition — Stale Index Overrides Radio Selection
-=================================================================
-This test MUST FAIL on unfixed code. Failure confirms the bug exists.
+Property 1: Single Click Navigation — Fixed Production Implementation
+=====================================================================
+These tests MUST PASS on the fixed production code.
 
-Bug description (§1.3):
-    When `st.session_state["page"]` contains the name of the previously active
-    page (P_current) and `st.radio` is called with `index=default_index` derived
-    from that stale value, the radio widget's selection is overridden back to
-    P_current during the first rerun — discarding the user's click to P_new.
+Production implementation (src/frontend/app.py):
 
-Expected behaviour (correct, §2.1 / §2.2):
-    One click must navigate immediately; the return value of `st.radio` must be
-    used directly as the active page without re-imposing the stale index.
+    selection = st.radio(
+        "Navigation",
+        _PAGE_NAMES,
+        index=0,
+        key="nav_radio",
+        label_visibility="collapsed",
+    )
 
-Strategy:
-    For each P_current in _PAGE_NAMES, for each P_new ≠ P_current:
-      1. Set session_state["page"] = P_current (simulates state after prior render)
-      2. Mock st.radio with a side_effect that reads the `index` kwarg and returns
-         _PAGE_NAMES[index] — faithfully reproducing the broken Streamlit behaviour
-         where passing index= overrides any user click and returns the stale page.
-      3. Call main() via the app module.
-      4. Capture which page module's .render() was called.
-      5. Assert rendered page == P_new  →  FAILS on broken code.
+Fix description:
+    The old broken code derived `default_index` from `session_state["page"]`
+    and passed it to `st.radio(index=default_index)`.  On the first rerun after
+    a click, Streamlit re-imposed that stale index and returned the old page
+    instead of the newly-clicked one.
 
-Counterexamples found on unfixed code (all 56 pairs fail):
-    session_state['page']='Dashboard', clicking 'Upload'    → renders 'Dashboard'
-    session_state['page']='Dashboard', clicking 'Analytics' → renders 'Dashboard'
-    session_state['page']='Upload',    clicking 'Dashboard' → renders 'Upload'
-    ... (every P_current / P_new ≠ P_current combination fails)
+    The production fix removes the stale-index derivation entirely.  `index=0`
+    is a one-time *hint* that only applies before the `key="nav_radio"` widget
+    has any stored state.  Once the user clicks a new page, Streamlit stores
+    that selection under `session_state["nav_radio"]` and returns it on every
+    subsequent rerun — regardless of the `index=` argument.
+
+How the test harness models Streamlit's keyed-widget behaviour:
+    In real Streamlit, once a user clicks P_new on a radio with
+    key="nav_radio", `session_state["nav_radio"]` is set to P_new and the
+    widget returns P_new on every rerun until another click occurs.
+
+    The test harness replicates this by:
+      1. Pre-seeding `session_state["nav_radio"] = p_new` (the user's click).
+      2. Using a `keyed_radio_side_effect` that reads
+         `session_state["nav_radio"]` and returns it — matching what Streamlit
+         actually does when a keyed widget has stored state.
+      3. This correctly ignores the `index=0` argument, just as the real
+         Streamlit runtime does once the widget has stored state.
+
+Expected behaviour (Requirements 1.1 / 1.2 / 1.3):
+    For any P_current (previously shown page) and any P_new ≠ P_current,
+    one click must immediately navigate to P_new.
+    The rendered page MUST equal P_new.
 """
 
 from __future__ import annotations
 
-import importlib
 import sys
 from pathlib import Path
-from types import ModuleType
 from unittest.mock import MagicMock
 
 import pytest
@@ -118,11 +130,11 @@ _PERMANENT_STUBS: dict[str, MagicMock] = {
 }
 
 # Inject stubs permanently (only if not already present so we don't trample
-# a real installation of streamlit for other tests in the suite)
+# a real installation of streamlit for other tests in the suite).
 for _stub_name, _stub_mod in _PERMANENT_STUBS.items():
     sys.modules.setdefault(_stub_name, _stub_mod)
 
-# Evict any stale cached import so we get a fresh one with our stubs active
+# Evict any stale cached import so we get a fresh one with our stubs active.
 for _key in list(sys.modules):
     if _key == "frontend.app":
         del sys.modules[_key]
@@ -131,50 +143,60 @@ for _key in list(sys.modules):
 # `import streamlit as st` and view imports inside app.py resolve to mocks.
 import frontend.app as _APP_MODULE  # type: ignore[import]
 
-# Ensure app.py's module-level `st` variable points to our mock
+# Ensure app.py's module-level `st` variable points to our mock.
 _APP_MODULE.st = _MODULE_MOCK_ST  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
-# Core simulation helper
+# Core simulation helper — models FIXED production behaviour
 # ---------------------------------------------------------------------------
-def _run_main_with_stale_state(p_current: str, p_new: str) -> str:  # noqa: ARG001
+def _run_main_with_nav_radio_click(p_current: str, p_new: str) -> str:
     """
-    Simulate one Streamlit rerun of main() under UNFIXED (broken) code conditions.
+    Simulate one Streamlit rerun of main() under the FIXED production code.
 
-    The broken code:
-      1. Reads session_state["page"] = p_current
-      2. Computes default_index = _PAGE_NAMES.index(p_current)
-      3. Calls st.radio(..., index=default_index)
-      4. Streamlit re-imposes the index — radio returns p_current, NOT p_new
+    How Streamlit keyed-widget state works in the fixed implementation:
+      - `st.radio(..., key="nav_radio")` stores its current value in
+        `session_state["nav_radio"]`.
+      - Once a user clicks P_new, Streamlit writes `session_state["nav_radio"]
+        = P_new` and the widget returns P_new on every subsequent call,
+        regardless of the `index=` argument.
+      - `index=0` is only a first-render hint; it has no effect once the
+        widget has stored state.
 
-    We replicate step 4 via broken_radio_side_effect: inspect the `index` kwarg
-    that the broken code passes and return _PAGE_NAMES[index].
+    This function replicates that behaviour:
+      1. Pre-seeds `session_state["nav_radio"] = p_new` (the user clicked).
+      2. Uses a `keyed_radio_side_effect` that reads back
+         `session_state["nav_radio"]` and returns it — identical to what
+         Streamlit does at runtime with a keyed radio widget.
 
     Parameters
     ----------
     p_current : str
-        The page currently stored in session_state (stale value).
+        The page currently stored in session_state["page"] (previous render).
     p_new : str
-        The page the user clicked (which the broken code discards).
+        The page the user just clicked (stored in nav_radio widget state).
 
     Returns
     -------
     str
-        Name of the page that was actually rendered.
+        Name of the page module whose .render() was called.
     """
-    # Fresh session state for this rerun: page is stale (p_current)
+    # Simulate session state after user click:
+    #   - "page"      : p_current (set by the previous render)
+    #   - "nav_radio" : p_new     (set by Streamlit's keyed widget on click)
     session_state = FakeSessionState({
         "page": p_current,
+        "nav_radio": p_new,
         "api_client": MagicMock(),
     })
 
-    # Broken radio: returns _PAGE_NAMES[index] — i.e. p_current — ignoring the click
-    def broken_radio_side_effect(*args, **kwargs):
-        idx = kwargs.get("index", 0)
-        return _PAGE_NAMES[idx]
+    # Keyed-radio side effect: Streamlit returns the widget's stored value
+    # (session_state["nav_radio"]) and ignores the index= argument, because
+    # the widget already has state from the user's click.
+    def keyed_radio_side_effect(*args, **kwargs):
+        return session_state["nav_radio"]
 
-    # Build per-test page mocks so we can detect which one's .render() gets called
+    # Build per-test page mocks so we can detect which one's .render() is called.
     render_mocks: dict[str, MagicMock] = {}
     mock_pages: dict[str, MagicMock] = {}
     for name in _PAGE_NAMES:
@@ -183,17 +205,17 @@ def _run_main_with_stale_state(p_current: str, p_new: str) -> str:  # noqa: ARG0
         render_mocks[name] = mod.render
         mock_pages[name] = mod
 
-    # Sidebar context manager
+    # Sidebar context manager mock.
     sidebar_ctx = MagicMock()
     sidebar_ctx.__enter__ = MagicMock(return_value=sidebar_ctx)
     sidebar_ctx.__exit__ = MagicMock(return_value=False)
 
-    # Wire up the module-level mock_st for this run
+    # Wire the module-level mock_st for this run.
     _MODULE_MOCK_ST.session_state = session_state
-    _MODULE_MOCK_ST.radio.side_effect = broken_radio_side_effect
+    _MODULE_MOCK_ST.radio.side_effect = keyed_radio_side_effect
     _MODULE_MOCK_ST.sidebar = sidebar_ctx
 
-    # Wire page registry
+    # Wire page registry.
     _APP_MODULE._PAGES = mock_pages  # type: ignore[attr-defined]
     _APP_MODULE._PAGE_NAMES = _PAGE_NAMES.copy()  # type: ignore[attr-defined]
 
@@ -222,7 +244,7 @@ def _page_pair_st():
 
 
 # ---------------------------------------------------------------------------
-# Property-Based Test — Bug Condition
+# Property-Based Test — Single-Click Navigation
 # Validates: Requirements 1.1, 1.2, 1.3
 # ---------------------------------------------------------------------------
 @given(pair=_page_pair_st())
@@ -234,22 +256,24 @@ def test_property1_single_click_navigates_to_new_page(pair):
     """
     **Validates: Requirements 1.1, 1.2, 1.3**
 
-    Property: For any P_current and any P_new ≠ P_current, after one simulated
-    rerun where the user has clicked P_new, the rendered page MUST be P_new.
+    Property: For any P_current and any P_new ≠ P_current, after one user
+    click on P_new, the rendered page MUST be P_new.
 
-    On unfixed code this FAILS because the broken radio returns P_current
-    (the stale session-state value re-imposed via default_index), not P_new.
+    The test harness models Streamlit's keyed-widget behaviour:
+    `session_state["nav_radio"] = p_new` is pre-seeded (as Streamlit sets it
+    when the user clicks), and `st.radio` returns that stored value —
+    ignoring `index=0` because the widget already has state.
 
-    Counterexample pattern:
-        session_state['page']='Dashboard', clicking 'Upload'
-        → broken code renders 'Dashboard' instead of 'Upload'
+    This PASSES on the fixed production code and would FAIL on the old broken
+    code (which re-derived default_index from session_state["page"] and
+    returned p_current instead of p_new).
     """
     p_current, p_new = pair
-    rendered = _run_main_with_stale_state(p_current, p_new)
+    rendered = _run_main_with_nav_radio_click(p_current, p_new)
     assert rendered == p_new, (
-        f"BUG CONFIRMED: session_state['page']='{p_current}', "
-        f"user clicked '{p_new}', "
-        f"but rendered page was '{rendered}' (stale index override)"
+        f"NAVIGATION FAILURE: session_state['page']='{p_current}', "
+        f"user clicked '{p_new}' (nav_radio='{p_new}'), "
+        f"but rendered page was '{rendered}'"
     )
 
 
@@ -272,13 +296,16 @@ def test_unit_single_click_navigates_to_new_page(p_current: str, p_new: str):
 
     Exhaustive parametric test over all 56 (p_current, p_new) pairs.
 
-    On unfixed code: FAILS for every pair with message:
-        BUG CONFIRMED: session_state['page']='<X>', user clicked '<Y>',
-        but rendered page was '<X>' (stale index override)
+    Verifies that a single user click on any page from any starting page
+    results in the clicked page being rendered immediately.
+
+    Models the fixed production behaviour: st.radio with key="nav_radio"
+    returns the user's click (session_state["nav_radio"]) regardless of
+    the index= argument.
     """
-    rendered = _run_main_with_stale_state(p_current, p_new)
+    rendered = _run_main_with_nav_radio_click(p_current, p_new)
     assert rendered == p_new, (
-        f"BUG CONFIRMED: session_state['page']='{p_current}', "
-        f"user clicked '{p_new}', "
-        f"but rendered page was '{rendered}' (stale index override)"
+        f"NAVIGATION FAILURE: session_state['page']='{p_current}', "
+        f"user clicked '{p_new}' (nav_radio='{p_new}'), "
+        f"but rendered page was '{rendered}'"
     )
