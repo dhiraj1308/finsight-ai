@@ -207,7 +207,7 @@ def _forecast_chart(df: pd.DataFrame, category: str) -> None:
     st.line_chart(chart_df, use_container_width=True)
     st.caption(
         "**Forecast** — predicted daily spending. "
-        "**Lower / Upper bound** — 80 % confidence interval."
+        "**Lower / Upper bound** — 95% confidence interval."
     )
 
 
@@ -251,7 +251,7 @@ def render(client: APIClient) -> None:
     """Render the Forecast page."""
     page_header(
         "📈 Forecast",
-        subtitle="Predicted future spending by category, powered by Prophet.",
+        subtitle="Predicted future spending by category using EWMA with linear trend.",
     )
 
     # Load categories from transaction history
