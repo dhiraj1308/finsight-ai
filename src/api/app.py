@@ -176,9 +176,13 @@ async def ingest(file: UploadFile = File(...), password: str | None = Form(None)
 
         inserted, skipped = store.insert(transactions)
 
+        # Index ONLY transactions that are not yet in the vector store.
+        # Querying already-indexed IDs avoids re-embedding the entire database
+        # on every upload — only genuinely new rows are embedded.
+        already_indexed: set[int] = vector_store.indexed_ids
         all_txns = store.get_all()
         for txn in all_txns:
-            if txn.id is not None:
+            if txn.id is not None and txn.id not in already_indexed:
                 try:
                     vector_store.index(txn)
                 except Exception as e:
@@ -212,9 +216,11 @@ async def ingest(file: UploadFile = File(...), password: str | None = Form(None)
 
             inserted, skipped = store.insert(transactions)
 
+            # Index ONLY transactions that are not yet in the vector store.
+            already_indexed = vector_store.indexed_ids
             all_txns = store.get_all()
             for txn in all_txns:
-                if txn.id is not None:
+                if txn.id is not None and txn.id not in already_indexed:
                     try:
                         vector_store.index(txn)
                     except Exception as e:

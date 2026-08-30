@@ -70,25 +70,60 @@ class VectorStore:
         return -1
 
     def index(self, transaction: Transaction) -> None:
+        """Index a transaction, embedding it only when necessary.
+
+        Skip policy (no embed, no write):
+          - Transaction ID already exists in metadata AND
+          - The stored text representation matches the current text.
+
+        Upsert policy (re-embed and overwrite):
+          - Transaction ID already exists BUT the text has changed
+            (e.g. category was updated after anomaly detection).
+
+        Insert policy (embed and append):
+          - Transaction ID is not yet in the metadata.
+        """
         text = self._transaction_text(transaction)
-        embedding = self._get_model().encode([text])[0].astype(np.float32)
         existing_index = self._find_index(transaction.id)
-        metadata_entry = {
-            "transaction_id": transaction.id,
-            "date": str(transaction.date),
-            "merchant": transaction.merchant,
-            "amount": transaction.amount,
-            "category": transaction.category,
-        }
+
         if existing_index >= 0:
+            # Already indexed — skip if the text representation is unchanged.
+            stored = self._metadata[existing_index]
+            stored_text = (
+                f"{stored.get('merchant', '')} "
+                f"{stored.get('category', '')} "
+                f"{stored.get('amount', '')} "
+                f"{stored.get('date', '')}"
+            )
+            if stored_text == text:
+                # Nothing changed — no embed, no disk write.
+                return
+            # Text changed (e.g. category updated) — re-embed in place.
+            embedding = self._get_model().encode([text])[0].astype(np.float32)
             self._embeddings[existing_index] = embedding
-            self._metadata[existing_index] = metadata_entry
+            self._metadata[existing_index] = {
+                "transaction_id": transaction.id,
+                "date": str(transaction.date),
+                "merchant": transaction.merchant,
+                "amount": transaction.amount,
+                "category": transaction.category,
+            }
         else:
+            # New transaction — embed and append.
+            embedding = self._get_model().encode([text])[0].astype(np.float32)
+            metadata_entry = {
+                "transaction_id": transaction.id,
+                "date": str(transaction.date),
+                "merchant": transaction.merchant,
+                "amount": transaction.amount,
+                "category": transaction.category,
+            }
             if self._embeddings is None or len(self._embeddings) == 0:
                 self._embeddings = embedding.reshape(1, -1)
             else:
                 self._embeddings = np.vstack([self._embeddings, embedding])
             self._metadata.append(metadata_entry)
+
         self._save()
 
     def search(self, query: str, k: int) -> list[Transaction]:
@@ -136,3 +171,17 @@ class VectorStore:
     @property
     def count(self) -> int:
         return len(self._metadata)
+
+    @property
+    def indexed_ids(self) -> frozenset[int]:
+        """Return the set of transaction IDs currently held in the vector store.
+
+        Returns a frozenset so callers can use it for membership checks
+        (``id in vs.indexed_ids``) without being able to accidentally mutate
+        the store's internal metadata.
+        """
+        return frozenset(
+            m["transaction_id"]
+            for m in self._metadata
+            if m.get("transaction_id") is not None
+        )
