@@ -1,7 +1,17 @@
-﻿import shutil
+﻿"""Unit tests for VectorStore.
+
+SentenceTransformer / torch are mocked out entirely so these tests can run
+in the same process as sklearn-based tests.  On Windows, sklearn's BLAS/LAPACK
+DLLs mutate the DLL loader state in a way that prevents torch's c10.dll from
+initialising afterwards (WinError 1114).  Mocking avoids that problem while
+still exercising every line of VectorStore logic.
+"""
+import shutil
 from datetime import date
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 
 from api.vector_store import VectorStore
@@ -9,6 +19,36 @@ from domain import Transaction
 
 pytestmark = pytest.mark.vector
 
+# ---------------------------------------------------------------------------
+# Shared mock: SentenceTransformer.encode returns a deterministic unit vector
+# so similarity calculations inside VectorStore still work correctly.
+# ---------------------------------------------------------------------------
+
+def _fake_encode(texts, **kwargs):
+    """Return one 8-d unit vector per input text (deterministic, non-zero)."""
+    vecs = []
+    for i, t in enumerate(texts):
+        v = np.zeros(8, dtype=np.float32)
+        v[i % 8] = 1.0
+        vecs.append(v)
+    return np.array(vecs, dtype=np.float32)
+
+
+@pytest.fixture(autouse=True)
+def mock_sentence_transformer():
+    """Patch SentenceTransformer for every test in this module."""
+    mock_model = MagicMock()
+    mock_model.encode.side_effect = _fake_encode
+    with patch(
+        "api.vector_store.VectorStore._get_model",
+        return_value=mock_model,
+    ):
+        yield mock_model
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _make_store(tmp_path) -> VectorStore:
     persist_dir = str(tmp_path / "vector_store")
@@ -29,6 +69,10 @@ def _make_transaction(
         category=category,
     )
 
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
 
 def test_initial_count_is_zero(tmp_path):
     vs = _make_store(tmp_path)
@@ -80,7 +124,7 @@ def test_upsert_does_not_increase_count(tmp_path):
     txn = _make_transaction(1, "Whole Foods", "Groceries")
     vs.index(txn)
     assert vs.count == 1
-    # Index same ID again
+    # Index same ID again — should update, not append
     updated = _make_transaction(1, "Whole Foods Market", "Groceries")
     vs.index(updated)
     assert vs.count == 1

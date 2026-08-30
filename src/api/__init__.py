@@ -1,2 +1,2 @@
-from .vector_store import VectorStore
-from .models import TransactionDTO, ForecastDTO, IngestResponse, ChatRequest, ChatResponse
+# api package — imports are done lazily inside each module to avoid
+# circular imports and sys.path ordering issues.

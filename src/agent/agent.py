@@ -1,144 +1,239 @@
+"""FinSight AI financial agent — direct-dispatch implementation.
+
+Architecture
+------------
+We intentionally do NOT use LangChain's AgentExecutor / create_tool_calling_agent.
+Reason: langchain-groq 0.1.x + llama-3.1-8b-instant produces
+  'Failed to call a function. Please adjust your prompt.'
+for multi-tool schemas with default arguments (a known upstream bug).
+
+Instead we use a two-step loop:
+  1. Send a structured prompt to the LLM asking it to PICK one tool and
+     supply its arguments as a single JSON object on one line.
+  2. Parse the JSON, call the Python function directly, inject the result
+     back as a system message, and ask the LLM to produce a final answer.
+
+This gives us:
+- Zero dependency on LangChain function-calling (avoids the Groq 400 bug)
+- Full control over what is sent to the model (prevents token overflow)
+- ASCII-safe tool outputs (prevents Windows cp1252 UnicodeEncodeError)
+- Meaningful fallback messages instead of generic errors
+"""
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
 
-from langchain.agents import AgentExecutor, create_tool_calling_agent
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_groq import ChatGroq
+from groq import Groq
 
-from agent.tools import create_tools
+from .tools import build_tool_registry, TOOL_DESCRIPTIONS
 
 logger = logging.getLogger(__name__)
 
-FINANCE_KEYWORDS = {
-    "spend", "spent", "spending", "transaction", "transactions",
-    "category", "categories", "budget", "forecast", "predict",
+# ---------------------------------------------------------------------------
+# Finance keyword gate — keeps non-finance questions out of the LLM pipeline
+# ---------------------------------------------------------------------------
+FINANCE_KEYWORDS: frozenset[str] = frozenset({
+    "spend", "spent", "spending", "paid", "pay", "payment",
+    "bought", "buy", "purchase", "purchased", "charge", "charged", "cost",
+    "transaction", "transactions", "expense", "expenses", "bill", "bills",
+    "income", "salary", "balance", "amount", "total", "budget", "money",
+    "cash", "finance", "financial", "fund",
+    "dining", "food", "groceries", "grocery", "transport", "transportation",
+    "fuel", "utilities", "utility", "entertainment", "healthcare", "health",
+    "shopping", "subscriptions", "subscription", "travel", "insurance",
+    "medical", "restaurant", "eating",
+    "category", "categories", "merchant", "merchants", "forecast", "predict",
     "anomaly", "anomalies", "unusual", "suspicious", "fraud",
-    "total", "amount", "cost", "price", "purchase", "payment",
-    "groceries", "dining", "transport", "utilities", "entertainment",
-    "healthcare", "shopping", "subscriptions", "merchant", "bank",
-    "credit", "debit", "statement", "balance", "expense", "income",
-    "afford", "save", "saving", "money", "financial", "finance",
-}
+    "trend", "average", "summary", "breakdown", "statistics",
+    "highest", "lowest", "biggest", "largest", "most", "top",
+    "today", "yesterday", "week", "month", "year", "last", "this",
+    "bank", "credit", "debit", "statement", "saving", "savings",
+    "cashflow", "net", "gross", "invest", "investment",
+})
 
 OUT_OF_SCOPE_RESPONSE = (
-    "I'm FinSight AI, a personal finance assistant. I can only help with "
-    "questions about your transactions, spending patterns, budgets, forecasts, "
-    "and anomalies. Please ask me something about your financial data."
+    "I'm FinSight AI, a personal finance assistant. "
+    "I can only help with questions about your transactions, spending, "
+    "forecasts, budgets, and anomalies."
 )
 
-SYSTEM_PROMPT = """You are FinSight AI, a personal finance assistant.
-You have access to the user's real transaction data through tools.
-ALWAYS use tools to get real data before answering - never make up numbers or transactions.
-If a tool returns no data, say so honestly. Never fabricate financial information.
-As soon as a tool returns a result, immediately respond with that information
-in plain text. Do not call the same tool twice for the same question."""
+_MAX_INPUT_CHARS = 400
 
-AGENT_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", SYSTEM_PROMPT),
-    ("human", "{input}"),
-    MessagesPlaceholder(variable_name="agent_scratchpad"),
-])
+# ---------------------------------------------------------------------------
+# Prompt templates
+# ---------------------------------------------------------------------------
+
+_DISPATCH_PROMPT = """\
+You are FinSight AI. Given the user question, choose ONE tool to call.
+
+Available tools:
+{tool_descriptions}
+
+User question: {question}
+
+Reply with ONLY a single JSON object on one line. Nothing else. Example:
+{{"tool": "get_spending_summary", "args": {{"category": "Dining"}}}}
+
+If no tool is needed, reply:
+{{"tool": "none", "args": {{}}}}
+"""
+
+_ANSWER_PROMPT = """\
+You are FinSight AI, a concise personal finance assistant.
+
+User question: {question}
+
+Data retrieved by tool '{tool_name}':
+{tool_result}
+
+Write a clear, factual 1-3 sentence answer using ONLY the data above.
+Do not invent numbers. If the data says no transactions were found, say so.
+"""
 
 
 class FinancialAgent:
-    """
-    Tool-calling agent. Each question is processed independently (stateless
-    reasoning) to avoid a known Groq/LangChain compatibility issue where
-    replaying tool-call history into the prompt causes malformed function
-    call generation on later turns. Display history is kept separately
-    per session for conversational context shown to the user, but is not
-    fed back into the LLM's reasoning step.
-    """
+    """Direct-dispatch financial agent — no LangChain AgentExecutor."""
 
     def __init__(self, store, vector_store, forecaster, anomaly_detector):
         self._store = store
-        self._vector_store = vector_store
-        self._forecaster = forecaster
-        self._anomaly_detector = anomaly_detector
-        self._session_history = {}  # session_id -> list of (question, answer)
+        self._session_history: dict[str, list[tuple[str, str]]] = {}
 
         api_key = os.getenv("LLM_API_KEY")
-        self._llm = ChatGroq(
-            api_key=api_key,
-            model="llama-3.1-8b-instant",
+        self._client = Groq(api_key=api_key)
+        self._model = "openai/gpt-oss-20b"
+        # Build tool registry: name -> callable
+        self._tools = build_tool_registry(
+            store, vector_store, forecaster, anomaly_detector
+        )
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _is_finance_question(self, message: str) -> bool:
+        lower = message.lower()
+        return any(kw in lower for kw in FINANCE_KEYWORDS)
+
+    def _trim(self, text: str, limit: int = _MAX_INPUT_CHARS) -> str:
+        return text if len(text) <= limit else text[:limit] + "..."
+
+    def _call_llm(self, prompt: str, max_tokens: int = 512) -> str:
+        """Call the Groq LLM and return the content string."""
+        resp = self._client.chat.completions.create(
+            model=self._model,
+            messages=[{"role": "user", "content": prompt}],
             temperature=0,
+            max_tokens=max_tokens,
         )
+        return resp.choices[0].message.content or ""
 
-        self._tools = create_tools(store, vector_store, forecaster, anomaly_detector)
+    def _dispatch(self, question: str) -> tuple[str, str]:
+        """Ask the LLM which tool to call and what args to pass.
 
-        self._agent = create_tool_calling_agent(
-            llm=self._llm,
-            tools=self._tools,
-            prompt=AGENT_PROMPT,
+        Returns (tool_name, tool_result).
+        """
+        prompt = _DISPATCH_PROMPT.format(
+            tool_descriptions=TOOL_DESCRIPTIONS,
+            question=question,
         )
+        raw = self._call_llm(prompt, max_tokens=150).strip()
+        logger.info("[dispatch] raw LLM reply: %r", raw)
 
-        self._executor = AgentExecutor(
-            agent=self._agent,
-            tools=self._tools,
-            verbose=False,
-            handle_parsing_errors=True,
-            max_iterations=3,
-            return_intermediate_steps=True,
+        # Extract the first JSON object from the response
+        json_match = re.search(r'\{.*\}', raw, re.DOTALL)
+        if not json_match:
+            logger.warning("[dispatch] No JSON found in LLM reply: %r", raw)
+            return "none", ""
+
+        try:
+            parsed = json.loads(json_match.group())
+        except json.JSONDecodeError as exc:
+            logger.warning("[dispatch] JSON parse error: %s  raw=%r", exc, raw)
+            return "none", ""
+
+        tool_name: str = parsed.get("tool", "none")
+        args: dict = parsed.get("args", {})
+
+        if tool_name == "none" or tool_name not in self._tools:
+            logger.info("[dispatch] tool_name=%r not in registry", tool_name)
+            return "none", ""
+
+        logger.info("[dispatch] calling tool=%r args=%r", tool_name, args)
+        try:
+            result: str = self._tools[tool_name](**args)
+        except TypeError as exc:
+            # Wrong arguments — call with no args as fallback
+            logger.warning(
+                "[dispatch] TypeError calling %s(%s): %s; retrying with no args",
+                tool_name, args, exc,
+            )
+            try:
+                result = self._tools[tool_name]()
+            except Exception as exc2:
+                logger.error("[dispatch] fallback also failed: %s", exc2)
+                result = f"Error calling tool '{tool_name}'."
+        except Exception as exc:
+            logger.error("[dispatch] tool %s error: %s", tool_name, exc, exc_info=True)
+            result = f"Error calling tool '{tool_name}'."
+
+        logger.info("[dispatch] tool result: %r", result[:120])
+        return tool_name, result
+
+    def _synthesize(self, question: str, tool_name: str, tool_result: str) -> str:
+        """Ask the LLM to formulate a final answer given the tool result."""
+        prompt = _ANSWER_PROMPT.format(
+            question=question,
+            tool_name=tool_name,
+            tool_result=tool_result,
         )
+        return self._call_llm(prompt, max_tokens=256).strip()
 
-    def _is_finance_question(self, message):
-        message_lower = message.lower()
-        return any(kw in message_lower for kw in FINANCE_KEYWORDS)
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
-    def _clean_response(self, text):
-        markers = [
-            "i made a mistake",
-            "i should not have",
-            "here is the correct response:",
-            "let me correct that:",
-        ]
-        text_lower = text.lower()
-        for marker in markers:
-            idx = text_lower.find(marker)
-            if idx != -1:
-                remainder = text[idx:]
-                colon_idx = remainder.find(":")
-                if colon_idx != -1 and colon_idx < 100:
-                    return remainder[colon_idx + 1:].strip()
-        return text.strip()
-
-    def get_history(self, session_id):
-        """Returns the last 5 (question, answer) pairs for a session."""
+    def get_history(self, session_id: str) -> list[tuple[str, str]]:
         return self._session_history.get(session_id, [])[-5:]
 
-    def chat(self, message, session_id):
+    def chat(self, message: str, session_id: str) -> str:
+        """Process one user message and return the assistant reply."""
         if not self._is_finance_question(message):
             return OUT_OF_SCOPE_RESPONSE
 
+        question = self._trim(message)
+        logger.info("[chat] session=%s question=%r", session_id, question)
+
         try:
-            result = self._executor.invoke({"input": message})
-            output = result.get("output", "")
+            tool_name, tool_result = self._dispatch(question)
 
-            if not output or "stopped due to" in output.lower():
-                intermediate_steps = result.get("intermediate_steps", [])
-                if intermediate_steps:
-                    answer = self._clean_response(str(intermediate_steps[-1][1]))
-                else:
-                    answer = (
-                        "I found relevant data but had trouble forming a "
-                        "complete response. Please try rephrasing your question."
-                    )
+            if tool_name == "none" or not tool_result:
+                # LLM decided no tool needed — answer directly from knowledge
+                prompt = (
+                    f"You are FinSight AI. Answer this finance question concisely "
+                    f"in 1-3 sentences: {question}"
+                )
+                answer = self._call_llm(prompt, max_tokens=200).strip()
             else:
-                answer = self._clean_response(output)
+                answer = self._synthesize(question, tool_name, tool_result)
 
-        except Exception as e:
-            logger.error(f"Agent error for session {session_id}: {e}")
+            if not answer:
+                answer = tool_result or "I could not retrieve relevant data. Please try rephrasing."
+
+            logger.info("[chat] session=%s answer=%r", session_id, answer[:120])
+
+        except Exception as exc:
+            logger.error("[chat] error session=%s: %s", session_id, exc, exc_info=True)
             answer = (
-                "I encountered an error while processing your question. "
-                "Please try again or rephrase your question."
+                "I encountered an error processing your question. "
+                "Please try again."
             )
 
-        if session_id not in self._session_history:
-            self._session_history[session_id] = []
-        self._session_history[session_id].append((message, answer))
-        if len(self._session_history[session_id]) > 5:
-            self._session_history[session_id] = self._session_history[session_id][-5:]
+        history = self._session_history.setdefault(session_id, [])
+        history.append((message, answer))
+        if len(history) > 10:
+            self._session_history[session_id] = history[-10:]
 
         return answer
