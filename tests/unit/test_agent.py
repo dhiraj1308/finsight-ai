@@ -319,3 +319,125 @@ def test_first_message_has_no_history_in_prompt():
     assert "Conversation context" not in prompt, (
         "No history block should appear in the first message's prompt"
     )
+
+
+# ---------------------------------------------------------------------------
+# Finance keyword gate — context-aware bypass tests
+# Verifies that:
+#   - Finance keyword in message → allowed (unchanged)
+#   - No keyword + no history    → blocked (unchanged)
+#   - No keyword + financial history → contextual bypass allowed
+#   - No keyword + non-financial history → still blocked
+#   - Session isolation: another session's history never grants bypass
+# ---------------------------------------------------------------------------
+
+from agent.agent import FINANCE_KEYWORDS
+
+
+# TEST 1 — existing finance keyword still works (gate unchanged)
+def test_gate_allows_finance_keyword_question():
+    """A message containing a finance keyword passes the gate as before."""
+    agent = _make_agent()
+    _stub_llm(agent,
+              dispatch_reply='{"tool": "none", "args": {}}',
+              answer_reply="You spent Rs.2450 on dining.")
+    result = agent.chat("How much did I spend on dining?", session_id="gate-1")
+    assert result != OUT_OF_SCOPE_RESPONSE
+
+
+# TEST 2 — clearly unrelated first message is still blocked
+def test_gate_blocks_unrelated_first_message():
+    """A first message with no finance keywords and no history is rejected."""
+    agent = _make_agent()
+    result = agent.chat("What is the capital of France?", session_id="gate-2")
+    assert result == OUT_OF_SCOPE_RESPONSE
+    agent._client.chat.completions.create.assert_not_called()
+
+
+# TEST 3 — contextual follow-up is allowed after a financial first message
+def test_gate_allows_vague_followup_after_financial_history():
+    """'What about that?' has no finance keywords but follows a financial Q&A."""
+    agent = _make_agent()
+    _stub_llm_sequence(
+        agent,
+        ('{"tool": "none", "args": {}}', "You spent Rs.2450 on Dining."),
+        ('{"tool": "none", "args": {}}', "Here are the details."),
+    )
+    agent.chat("How much did I spend on dining?", session_id="gate-3")
+    result = agent.chat("What about that?", session_id="gate-3")
+    assert result != OUT_OF_SCOPE_RESPONSE, (
+        "'What about that?' should not be blocked when session has financial history"
+    )
+
+
+# TEST 4 — contextual period follow-up is allowed
+def test_gate_allows_period_followup_in_financial_session():
+    """'What about the previous month?' after a financial question must pass."""
+    agent = _make_agent()
+    _stub_llm_sequence(
+        agent,
+        ('{"tool": "none", "args": {}}', "You spent Rs.3200 on Groceries this month."),
+        ('{"tool": "none", "args": {}}', "Previous month: Rs.2800 on Groceries."),
+    )
+    agent.chat("How much did I spend on groceries this month?", session_id="gate-4")
+    result = agent.chat("What about the previous month?", session_id="gate-4")
+    assert result != OUT_OF_SCOPE_RESPONSE, (
+        "Period follow-up should not be blocked in a financial session"
+    )
+
+
+# TEST 5 — session isolation: session B cannot inherit session A's context
+def test_gate_session_isolation_no_cross_session_bypass():
+    """Session A has financial history; session B's vague message must still be blocked."""
+    agent = _make_agent()
+    _stub_llm(agent,
+              dispatch_reply='{"tool": "none", "args": {}}',
+              answer_reply="You spent Rs.5000 on Travel.")
+    # Establish financial history only for session A
+    agent.chat("How much did I spend on travel?", session_id="gate-session-A")
+
+    # Session B has NO history of its own — its vague message must be rejected
+    result = agent.chat("What about that?", session_id="gate-session-B")
+    assert result == OUT_OF_SCOPE_RESPONSE, (
+        "Session B must not bypass the gate using session A's financial history"
+    )
+
+
+# TEST 6 — financial history does NOT make arbitrary unrelated questions pass
+def test_gate_blocks_unrelated_question_despite_financial_history():
+    """Even with financial history, clearly unrelated questions must be rejected."""
+    agent = _make_agent()
+    _stub_llm(agent,
+              dispatch_reply='{"tool": "none", "args": {}}',
+              answer_reply="You spent Rs.2450 on Dining.")
+    agent.chat("How much did I spend on dining?", session_id="gate-6")
+
+    # Now ask something completely unrelated
+    call_count_before = agent._client.chat.completions.create.call_count
+    result = agent.chat("What is the capital of France?", session_id="gate-6")
+    assert result == OUT_OF_SCOPE_RESPONSE, (
+        "Clearly unrelated question must still be rejected even after financial history"
+    )
+    # No additional LLM calls for the rejected message
+    assert agent._client.chat.completions.create.call_count == call_count_before
+
+
+# TEST 7 — no history + vague follow-up → still rejected
+def test_gate_blocks_vague_followup_with_no_history():
+    """'What about that?' with no session history must be rejected by the gate."""
+    agent = _make_agent()
+    result = agent.chat("What about that?", session_id="gate-7")
+    assert result == OUT_OF_SCOPE_RESPONSE, (
+        "A vague follow-up with no history must not bypass the finance gate"
+    )
+    agent._client.chat.completions.create.assert_not_called()
+
+
+# TEST 8 — rejected messages are NOT appended to session history
+def test_gate_rejection_does_not_pollute_history():
+    """When the gate rejects a message, it must not be stored in session history."""
+    agent = _make_agent()
+    agent.chat("What is the capital of France?", session_id="gate-8")
+    assert "gate-8" not in agent._session_history, (
+        "Rejected out-of-scope message must not appear in session history"
+    )

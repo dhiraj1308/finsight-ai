@@ -122,6 +122,65 @@ class FinancialAgent:
         lower = message.lower()
         return any(kw in lower for kw in FINANCE_KEYWORDS)
 
+    def _session_has_financial_context(self, session_id: str) -> bool:
+        """Return True if this session already contains at least one exchange
+        whose user message contained a finance keyword.
+
+        Used to allow short contextual follow-ups (e.g. "What about that?" or
+        "And last month?") that lack finance keywords themselves but clearly
+        continue a financial conversation.
+
+        Only the user side of prior turns is checked — not assistant answers —
+        so that canned phrases in assistant responses never by themselves qualify
+        a session as "financial".
+
+        Session isolation is guaranteed: only this session's history is checked.
+        """
+        prior_pairs = self._session_history.get(session_id, [])
+        return any(
+            self._is_finance_question(user_msg)
+            for user_msg, _assistant_msg in prior_pairs
+        )
+
+    # Interrogative / referential words that signal a follow-up question.
+    # A message lacking finance keywords is only treated as a contextual
+    # follow-up when it contains at least one of these markers AND is short
+    # enough (≤ _MAX_FOLLOWUP_WORDS words) to be a plausible follow-up rather
+    # than a fresh interrogative sentence about an unrelated subject.
+    _FOLLOWUP_MARKERS: frozenset[str] = frozenset({
+        "what", "which", "how", "when", "where", "who", "why",
+        "that", "those", "this", "these", "it", "them", "its",
+        "and", "but", "also", "too", "again", "more", "else",
+        "previous", "prior", "before", "instead", "other", "another",
+        "compare", "versus", "vs", "difference",
+    })
+
+    # Messages with more words than this threshold are unlikely to be simple
+    # follow-ups — they are more likely to be independent new questions that
+    # happen to use referential words (e.g. "What is the capital of France?").
+    _MAX_FOLLOWUP_WORDS: int = 5
+
+    def _looks_like_followup(self, message: str) -> bool:
+        """Return True if the message looks like a short contextual follow-up.
+
+        Two conditions must both hold:
+          1. The message is short (≤ _MAX_FOLLOWUP_WORDS words) — longer
+             messages are likely independent questions even if they start with
+             "what" or "how".
+          2. The message contains at least one follow-up/referential marker
+             word — interrogative or referential words that indicate the
+             message continues a prior conversation thread.
+
+        Together these criteria allow "What about that?" (3 words) and
+        "And last month?" (3 words) while blocking "What is the capital of
+        France?" (7 words) even inside a session with financial history.
+        """
+        words = message.strip().split()
+        if len(words) > self._MAX_FOLLOWUP_WORDS:
+            return False
+        lower = message.lower()
+        return any(marker in lower for marker in self._FOLLOWUP_MARKERS)
+
     def _trim(self, text: str, limit: int = _MAX_INPUT_CHARS) -> str:
         return text if len(text) <= limit else text[:limit] + "..."
 
@@ -236,7 +295,20 @@ class FinancialAgent:
 
     def chat(self, message: str, session_id: str) -> str:
         """Process one user message and return the assistant reply."""
-        if not self._is_finance_question(message):
+        # Finance gate: allow if the message itself contains finance keywords,
+        # OR if it is a contextual follow-up in an already-financial session.
+        # A question is treated as a contextual follow-up only when ALL THREE hold:
+        #   1. it lacks finance keywords itself,
+        #   2. it contains at least one follow-up/referential marker word, AND
+        #   3. at least one prior user message in this session had finance keywords.
+        # This allows "What about that?" or "And last month?" mid-conversation
+        # while still blocking unrelated declarative statements ("What is the
+        # capital of France?") even after a financial conversation has started.
+        is_followup_in_financial_session = (
+            self._looks_like_followup(message)
+            and self._session_has_financial_context(session_id)
+        )
+        if not self._is_finance_question(message) and not is_followup_in_financial_session:
             return OUT_OF_SCOPE_RESPONSE
 
         question = self._trim(message)
