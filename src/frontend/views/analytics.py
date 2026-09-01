@@ -117,23 +117,24 @@ def _sidebar_controls(df: pd.DataFrame) -> tuple[str, date, date]:
 
 
 def _kpi_cards(df: pd.DataFrame) -> None:
-    """Render four KPI metric cards for the filtered dataset."""
-    # Treat positive amounts as spending, negative as income
-    spending = df.loc[df["amount"] > 0, "amount"].sum()
-    income = abs(df.loc[df["amount"] < 0, "amount"].sum())
-    net_flow = income - spending
-    avg_txn = df["amount"].abs().mean() if len(df) else 0.0
+    """Render four KPI metric cards for the filtered dataset.
+
+    All stored transaction amounts are positive spending/debit values —
+    the ingestion pipeline maps credit/deposit columns to ignored fields
+    and the PDF parser extracts only debit amounts.  Income tracking is
+    not part of the current data model, so metrics are derived solely
+    from spending amounts.
+    """
+    total_spending = df["amount"].sum() if not df.empty else 0.0
+    total_txns = len(df)
+    avg_txn = df["amount"].mean() if total_txns else 0.0
+    largest_txn = df["amount"].max() if total_txns else 0.0
 
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Total Spending", f"₹{spending:,.2f}")
-    col2.metric("Total Income", f"₹{income:,.2f}")
-    col3.metric(
-        "Net Cash Flow",
-        f"₹{abs(net_flow):,.2f}",
-        delta=f"{'surplus' if net_flow >= 0 else 'deficit'}",
-        delta_color="normal" if net_flow >= 0 else "inverse",
-    )
-    col4.metric("Avg Transaction", f"₹{avg_txn:,.2f}")
+    col1.metric("Total Spending", f"₹{total_spending:,.2f}")
+    col2.metric("Transaction Count", f"{total_txns:,}")
+    col3.metric("Avg Transaction", f"₹{avg_txn:,.2f}")
+    col4.metric("Largest Transaction", f"₹{largest_txn:,.2f}")
 
 
 # ---------------------------------------------------------------------------
