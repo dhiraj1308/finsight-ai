@@ -25,18 +25,35 @@ def _show_result(result: dict[str, Any]) -> None:
     response are silently omitted so the page remains forward-compatible if
     the backend is extended.
 
+    The top-level status banner reflects the actual outcome:
+    - Any new transactions inserted → green success.
+    - No new transactions, but duplicates skipped → amber warning (duplicate
+      upload with no data change).
+    - Neither inserted nor skipped and no warnings → amber warning (file
+      contained no parseable transactions).
+
     Parameters
     ----------
     result:
         Parsed ``IngestResponse`` payload from ``APIClient.upload_statement``.
     """
-    st.success("✅ Statement uploaded successfully.")
-
     ingested: int = result.get("ingested", 0)
     skipped: int = result.get("skipped", 0)
     categories: int | None = result.get("categories_created")
     anomalies: int | None = result.get("anomalies_detected")
+    warnings: list[str] = result.get("warnings", [])
 
+    # ── Status banner ────────────────────────────────────────────────────────
+    if ingested > 0:
+        st.success("✅ Statement uploaded successfully.")
+    elif skipped > 0:
+        st.warning(
+            "⚠️ No new transactions added — all rows already exist in the database."
+        )
+    else:
+        st.warning("⚠️ No transactions found in the file.")
+
+    # ── Metric cards ─────────────────────────────────────────────────────────
     # Build only the metric columns that have data
     metrics: list[tuple[str, int]] = [
         ("Transactions Ingested", ingested),
@@ -51,7 +68,7 @@ def _show_result(result: dict[str, Any]) -> None:
     for col, (label, value) in zip(cols, metrics):
         col.metric(label, value)
 
-    warnings: list[str] = result.get("warnings", [])
+    # ── Per-row warnings ──────────────────────────────────────────────────────
     if warnings:
         with st.expander(f"⚠️ Warnings ({len(warnings)})"):
             for warning in warnings:
