@@ -190,11 +190,14 @@ async def ingest(file: UploadFile = File(...), password: str | None = Form(None)
 
         try:
             if len(all_txns) >= 10:
-                anomaly_detector.fit_and_score(store)
+                anomaly_count = anomaly_detector.fit_and_score(store)
+            else:
+                anomaly_count = None
         except Exception as e:
+            anomaly_count = None
             logger.warning(f"Anomaly detection failed: {e}")
 
-        return IngestResponse(ingested=inserted, skipped=skipped, warnings=summary.warnings[:10])
+        return IngestResponse(ingested=inserted, skipped=skipped, warnings=summary.warnings[:10], anomalies_detected=anomaly_count)
 
     else:
         # CSV path: write to data/raw/, parse from disk, clean up
@@ -228,11 +231,14 @@ async def ingest(file: UploadFile = File(...), password: str | None = Form(None)
 
             try:
                 if len(all_txns) >= 10:
-                    anomaly_detector.fit_and_score(store)
+                    anomaly_count = anomaly_detector.fit_and_score(store)
+                else:
+                    anomaly_count = None
             except Exception as e:
+                anomaly_count = None
                 logger.warning(f"Anomaly detection failed: {e}")
 
-            return IngestResponse(ingested=inserted, skipped=skipped, warnings=summary.warnings[:10])
+            return IngestResponse(ingested=inserted, skipped=skipped, warnings=summary.warnings[:10], anomalies_detected=anomaly_count)
         finally:
             try:
                 tmp_path.unlink(missing_ok=True)

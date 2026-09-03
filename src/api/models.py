@@ -41,6 +41,7 @@ class IngestResponse(BaseModel):
     skipped: int
     warnings: list[str] = []
     error_code: str | None = None
+    anomalies_detected: int | None = None
 
 
 class ChatRequest(BaseModel):
