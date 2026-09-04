@@ -203,8 +203,16 @@ async def ingest(file: UploadFile = File(...), password: str | None = Form(None)
         return IngestResponse(ingested=inserted, skipped=skipped, warnings=summary.warnings[:10], anomalies_detected=anomaly_count, needs_review_count=needs_review_count)
 
     else:
-        # CSV path: write to data/raw/, parse from disk, clean up
-        tmp_path = Path(f"data/raw/{filename}")
+        # CSV path: write to data/raw/, parse from disk, clean up.
+        # Derive a filesystem-safe basename from the uploaded filename so that
+        # directory-traversal sequences such as "../../.env.csv" or
+        # "subdir/evil.csv" cannot escape data/raw/.  The original `filename`
+        # variable is intentionally left unchanged so that Transaction.source_file
+        # and duplicate-detection behaviour are unaffected.
+        safe_filename = Path(filename).name
+        if not safe_filename:
+            raise HTTPException(status_code=422, detail="Invalid filename.")
+        tmp_path = Path("data/raw") / safe_filename
         tmp_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path.write_bytes(content)
 
