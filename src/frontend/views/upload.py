@@ -39,7 +39,7 @@ def _show_result(result: dict[str, Any]) -> None:
     """
     ingested: int = result.get("ingested", 0)
     skipped: int = result.get("skipped", 0)
-    categories: int | None = result.get("categories_created")
+    needs_review: int | None = result.get("needs_review_count")
     anomalies: int | None = result.get("anomalies_detected")
     warnings: list[str] = result.get("warnings", [])
 
@@ -59,8 +59,8 @@ def _show_result(result: dict[str, Any]) -> None:
         ("Transactions Ingested", ingested),
         ("Transactions Skipped", skipped),
     ]
-    if categories is not None:
-        metrics.append(("Categories Created", categories))
+    if needs_review is not None:
+        metrics.append(("Needs Review", needs_review))
     if anomalies is not None:
         metrics.append(("Anomalies Detected", anomalies))
 

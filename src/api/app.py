@@ -173,6 +173,9 @@ async def ingest(file: UploadFile = File(...), password: str | None = Form(None)
 
         if categorizer._is_trained:
             transactions = categorizer.predict_batch(transactions)
+            needs_review_count = sum(1 for t in transactions if t.needs_review)
+        else:
+            needs_review_count = None
 
         inserted, skipped = store.insert(transactions)
 
@@ -197,7 +200,7 @@ async def ingest(file: UploadFile = File(...), password: str | None = Form(None)
             anomaly_count = None
             logger.warning(f"Anomaly detection failed: {e}")
 
-        return IngestResponse(ingested=inserted, skipped=skipped, warnings=summary.warnings[:10], anomalies_detected=anomaly_count)
+        return IngestResponse(ingested=inserted, skipped=skipped, warnings=summary.warnings[:10], anomalies_detected=anomaly_count, needs_review_count=needs_review_count)
 
     else:
         # CSV path: write to data/raw/, parse from disk, clean up
@@ -216,6 +219,9 @@ async def ingest(file: UploadFile = File(...), password: str | None = Form(None)
 
             if categorizer._is_trained:
                 transactions = categorizer.predict_batch(transactions)
+                needs_review_count = sum(1 for t in transactions if t.needs_review)
+            else:
+                needs_review_count = None
 
             inserted, skipped = store.insert(transactions)
 
@@ -238,7 +244,7 @@ async def ingest(file: UploadFile = File(...), password: str | None = Form(None)
                 anomaly_count = None
                 logger.warning(f"Anomaly detection failed: {e}")
 
-            return IngestResponse(ingested=inserted, skipped=skipped, warnings=summary.warnings[:10], anomalies_detected=anomaly_count)
+            return IngestResponse(ingested=inserted, skipped=skipped, warnings=summary.warnings[:10], anomalies_detected=anomaly_count, needs_review_count=needs_review_count)
         finally:
             try:
                 tmp_path.unlink(missing_ok=True)

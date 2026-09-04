@@ -185,3 +185,78 @@ def test_show_result_warnings_expander_shown_when_warnings_present():
     assert "Warning" in expander_label or "warning" in expander_label, (
         f"Expander label should mention warnings, got: {expander_label!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# TEST D — needs_review_count metric card renders with correct label and value
+# ---------------------------------------------------------------------------
+
+def test_show_result_renders_needs_review_metric_when_present():
+    """
+    result contains needs_review_count=3 → a 'Needs Review' metric card
+    with value 3 must be rendered; 'Categories Created' must not appear.
+    """
+    mock_st = _make_mock_st()
+    _call_show_result(
+        {"ingested": 10, "skipped": 0, "warnings": [], "needs_review_count": 3},
+        mock_st,
+    )
+
+    col = mock_st.columns.return_value[0]
+    metric_calls = col.metric.call_args_list
+    labels = [c.args[0] for c in metric_calls]
+    values = [c.args[1] for c in metric_calls]
+
+    assert "Needs Review" in labels, (
+        f"Expected 'Needs Review' in metric labels, got: {labels}"
+    )
+    idx = labels.index("Needs Review")
+    assert values[idx] == 3, (
+        f"Expected 'Needs Review' value to be 3, got {values[idx]!r}"
+    )
+
+    # Old dead metric must not appear
+    assert "Categories Created" not in labels, (
+        "'Categories Created' label must not appear — it was replaced by 'Needs Review'"
+    )
+
+
+def test_show_result_does_not_render_needs_review_when_none():
+    """
+    needs_review_count=None (categorizer not trained) → 'Needs Review'
+    metric card must NOT appear.
+    """
+    mock_st = _make_mock_st()
+    _call_show_result(
+        {"ingested": 5, "skipped": 0, "warnings": [], "needs_review_count": None},
+        mock_st,
+    )
+
+    col = mock_st.columns.return_value[0]
+    labels = [c.args[0] for c in col.metric.call_args_list]
+
+    assert "Needs Review" not in labels, (
+        "Needs Review card must not appear when needs_review_count is None"
+    )
+
+
+def test_show_result_renders_needs_review_zero_when_all_confident():
+    """
+    needs_review_count=0 (all categorized confidently) → card appears
+    with value 0.
+    """
+    mock_st = _make_mock_st()
+    _call_show_result(
+        {"ingested": 8, "skipped": 0, "warnings": [], "needs_review_count": 0},
+        mock_st,
+    )
+
+    col = mock_st.columns.return_value[0]
+    labels = [c.args[0] for c in col.metric.call_args_list]
+    values = [c.args[1] for c in col.metric.call_args_list]
+
+    assert "Needs Review" in labels, (
+        "Needs Review card must appear even when count is 0"
+    )
+    idx = labels.index("Needs Review")
+    assert values[idx] == 0

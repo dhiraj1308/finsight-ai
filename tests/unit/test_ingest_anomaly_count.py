@@ -196,3 +196,166 @@ def test_ingest_anomalies_detected_is_none_when_detector_raises():
     body = response.json()
     assert body["anomalies_detected"] is None
     assert body["ingested"] == 15   # core ingestion unaffected
+
+
+# ===========================================================================
+# needs_review_count tests
+# ===========================================================================
+
+def _make_components_with_categorizer(
+    n_stored: int,
+    anomaly_count: int,
+    is_trained: bool,
+    needs_review_flags: list[bool],
+):
+    """Build mock AppComponents where the categorizer is configurable.
+
+    The categorizer mock's predict_batch() mutates each transaction in-place
+    to set .needs_review according to needs_review_flags (cycled if shorter
+    than n_stored), mirroring the real Categorizer.predict_batch() behaviour.
+    """
+    from domain import Transaction
+    from datetime import date
+
+    stored = [
+        Transaction(
+            id=i + 1,
+            date=date(2024, 1, (i % 28) + 1),
+            merchant=f"Store {i}",
+            amount=float(10 + i),
+            category="Groceries",
+            source_file="test.csv",
+        )
+        for i in range(n_stored)
+    ]
+
+    store = MagicMock()
+    store.insert.return_value = (n_stored, 0)
+    store.get_all.return_value = stored
+
+    vector_store = MagicMock()
+    vector_store.indexed_ids = frozenset()
+
+    categorizer = MagicMock()
+    categorizer._is_trained = is_trained
+
+    if is_trained:
+        def _fake_predict_batch(txns):
+            for idx, txn in enumerate(txns):
+                txn.needs_review = needs_review_flags[idx % len(needs_review_flags)]
+                txn.category = "Other" if txn.needs_review else "Groceries"
+            return txns
+        categorizer.predict_batch.side_effect = _fake_predict_batch
+
+    anomaly_detector = MagicMock()
+    anomaly_detector.fit_and_score.return_value = anomaly_count
+
+    forecaster = MagicMock()
+
+    components = MagicMock()
+    components.store = store
+    components.vector_store = vector_store
+    components.categorizer = categorizer
+    components.anomaly_detector = anomaly_detector
+    components.forecaster = forecaster
+    return components
+
+
+# ---------------------------------------------------------------------------
+# TEST A — categorizer trained, some transactions need review
+# ---------------------------------------------------------------------------
+
+def test_ingest_needs_review_count_when_some_need_review():
+    """
+    Categorizer trained + 2 of 5 transactions flagged with needs_review=True
+    → response contains needs_review_count = 2.
+    """
+    # Flags: True, False, True, False, False → 2 needing review
+    flags = [True, False, True, False, False]
+    components = _make_components_with_categorizer(
+        n_stored=5,
+        anomaly_count=0,
+        is_trained=True,
+        needs_review_flags=flags,
+    )
+    client = _make_client(components)
+
+    response = client.post(
+        "/ingest",
+        files={"file": ("statement.csv", _csv_bytes(5), "text/csv")},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+
+    assert "needs_review_count" in body, (
+        f"Expected 'needs_review_count' in response, got: {list(body.keys())}"
+    )
+    assert body["needs_review_count"] == 2, (
+        f"Expected needs_review_count=2, got {body['needs_review_count']!r}"
+    )
+    assert isinstance(body["needs_review_count"], int)
+
+
+# ---------------------------------------------------------------------------
+# TEST B — categorizer trained, no transactions need review
+# ---------------------------------------------------------------------------
+
+def test_ingest_needs_review_count_zero_when_all_high_confidence():
+    """
+    Categorizer trained + all transactions have needs_review=False
+    → response contains needs_review_count = 0.
+    """
+    flags = [False, False, False]
+    components = _make_components_with_categorizer(
+        n_stored=3,
+        anomaly_count=0,
+        is_trained=True,
+        needs_review_flags=flags,
+    )
+    client = _make_client(components)
+
+    response = client.post(
+        "/ingest",
+        files={"file": ("statement.csv", _csv_bytes(3), "text/csv")},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+
+    assert body["needs_review_count"] == 0, (
+        f"Expected needs_review_count=0, got {body['needs_review_count']!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# TEST C — categorizer not trained
+# ---------------------------------------------------------------------------
+
+def test_ingest_needs_review_count_is_none_when_categorizer_not_trained():
+    """
+    Categorizer not trained (_is_trained=False) → predict_batch() is not
+    called → needs_review_count must be null in the JSON response.
+    """
+    components = _make_components_with_categorizer(
+        n_stored=5,
+        anomaly_count=0,
+        is_trained=False,
+        needs_review_flags=[],
+    )
+    client = _make_client(components)
+
+    response = client.post(
+        "/ingest",
+        files={"file": ("statement.csv", _csv_bytes(5), "text/csv")},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+
+    assert "needs_review_count" in body
+    assert body["needs_review_count"] is None, (
+        f"Expected null when categorizer not trained, "
+        f"got {body['needs_review_count']!r}"
+    )
+    components.categorizer.predict_batch.assert_not_called()

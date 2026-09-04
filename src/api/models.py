@@ -42,6 +42,7 @@ class IngestResponse(BaseModel):
     warnings: list[str] = []
     error_code: str | None = None
     anomalies_detected: int | None = None
+    needs_review_count: int | None = None
 
 
 class ChatRequest(BaseModel):
