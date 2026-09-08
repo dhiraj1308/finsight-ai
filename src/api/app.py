@@ -137,12 +137,14 @@ def _txn_to_dto(txn) -> TransactionDTO:
 async def ingest(file: UploadFile = File(...), password: str | None = Form(None)):
     from ingestion.csv_parser import CSVParser
     from ingestion.pdf_parser import PDFParser
+    from api.services.ingest_service import IngestService
 
     filename = file.filename or ""
     if not (filename.endswith(".csv") or filename.endswith(".pdf")):
         raise HTTPException(status_code=422, detail="Only PDF and CSV files are supported.")
 
     store, vector_store, categorizer, anomaly_detector, _ = _get_components()
+    service = IngestService(store, vector_store, categorizer, anomaly_detector)
 
     content = await file.read()
 
@@ -168,39 +170,7 @@ async def ingest(file: UploadFile = File(...), password: str | None = Form(None)
                 )
             raise HTTPException(status_code=422, detail=f"File error: {summary.file_errors[0]}")
 
-        for txn in transactions:
-            txn.source_file = filename
-
-        if categorizer._is_trained:
-            transactions = categorizer.predict_batch(transactions)
-            needs_review_count = sum(1 for t in transactions if t.needs_review)
-        else:
-            needs_review_count = None
-
-        inserted, skipped = store.insert(transactions)
-
-        # Index ONLY transactions that are not yet in the vector store.
-        # Querying already-indexed IDs avoids re-embedding the entire database
-        # on every upload — only genuinely new rows are embedded.
-        already_indexed: set[int] = vector_store.indexed_ids
-        all_txns = store.get_all()
-        for txn in all_txns:
-            if txn.id is not None and txn.id not in already_indexed:
-                try:
-                    vector_store.index(txn)
-                except Exception as e:
-                    logger.warning(f"Vector indexing failed for {txn.id}: {e}")
-
-        try:
-            if len(all_txns) >= 10:
-                anomaly_count = anomaly_detector.fit_and_score(store)
-            else:
-                anomaly_count = None
-        except Exception as e:
-            anomaly_count = None
-            logger.warning(f"Anomaly detection failed: {e}")
-
-        return IngestResponse(ingested=inserted, skipped=skipped, warnings=summary.warnings[:10], anomalies_detected=anomaly_count, needs_review_count=needs_review_count)
+        return service.process(transactions, filename, summary.warnings)
 
     else:
         # CSV path: write to data/raw/, parse from disk, clean up.
@@ -222,37 +192,7 @@ async def ingest(file: UploadFile = File(...), password: str | None = Form(None)
             if summary.file_errors:
                 raise HTTPException(status_code=422, detail=f"File error: {summary.file_errors[0]}")
 
-            for txn in transactions:
-                txn.source_file = filename
-
-            if categorizer._is_trained:
-                transactions = categorizer.predict_batch(transactions)
-                needs_review_count = sum(1 for t in transactions if t.needs_review)
-            else:
-                needs_review_count = None
-
-            inserted, skipped = store.insert(transactions)
-
-            # Index ONLY transactions that are not yet in the vector store.
-            already_indexed = vector_store.indexed_ids
-            all_txns = store.get_all()
-            for txn in all_txns:
-                if txn.id is not None and txn.id not in already_indexed:
-                    try:
-                        vector_store.index(txn)
-                    except Exception as e:
-                        logger.warning(f"Vector indexing failed for {txn.id}: {e}")
-
-            try:
-                if len(all_txns) >= 10:
-                    anomaly_count = anomaly_detector.fit_and_score(store)
-                else:
-                    anomaly_count = None
-            except Exception as e:
-                anomaly_count = None
-                logger.warning(f"Anomaly detection failed: {e}")
-
-            return IngestResponse(ingested=inserted, skipped=skipped, warnings=summary.warnings[:10], anomalies_detected=anomaly_count, needs_review_count=needs_review_count)
+            return service.process(transactions, filename, summary.warnings)
         finally:
             try:
                 tmp_path.unlink(missing_ok=True)
