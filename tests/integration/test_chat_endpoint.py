@@ -100,8 +100,8 @@ def _make_client(tmp_path: Path) -> TestClient:
     try:
         client = TestClient(app, raise_server_exceptions=True)
         app.state.components = components
-        # app.state.agent is intentionally NOT set here.
-        # Each test sets it to its own mock or real agent before sending requests.
+        # agent is intentionally NOT set on components here.
+        # Each test sets app.state.components.agent to its own mock or real agent.
     finally:
         app.router.lifespan_context = original_lifespan
 
@@ -159,7 +159,7 @@ class TestChatOutOfScope:
         from api.app import app
 
         real_agent = _make_real_agent()
-        app.state.agent = real_agent
+        app.state.components.agent = real_agent
 
         response = client.post(
             "/chat",
@@ -198,7 +198,7 @@ class TestChatValidation:
     def _set_mock_agent(self, client) -> MagicMock:
         from api.app import app
         mock_agent = MagicMock()
-        app.state.agent = mock_agent
+        app.state.components.agent = mock_agent
         return mock_agent
 
     # ------------------------------------------------------------------
@@ -320,7 +320,7 @@ class TestChatSuccessAndError:
 
         mock_agent = MagicMock()
         mock_agent.chat.return_value = "You spent Rs.500 on Groceries."
-        app.state.agent = mock_agent
+        app.state.components.agent = mock_agent
 
         response = client.post(
             "/chat",
@@ -363,7 +363,7 @@ class TestChatSuccessAndError:
 
         mock_agent = MagicMock()
         mock_agent.chat.side_effect = RuntimeError("LLM unavailable")
-        app.state.agent = mock_agent
+        app.state.components.agent = mock_agent
 
         response = client.post(
             "/chat",

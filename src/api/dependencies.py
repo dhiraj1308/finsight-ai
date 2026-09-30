@@ -13,6 +13,7 @@ class AppComponents:
     categorizer: object
     anomaly_detector: object
     forecaster: object
+    agent: object = None   # FinancialAgent — populated by the lifespan after construction
 
 
 def create_components(settings) -> AppComponents:

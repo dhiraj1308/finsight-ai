@@ -96,8 +96,8 @@ def _make_client(components) -> TestClient:
     app.router.lifespan_context = _noop_lifespan
     try:
         client = TestClient(app, raise_server_exceptions=True)
+        components.agent = MagicMock()
         app.state.components = components
-        app.state.agent = MagicMock()
         return client
     finally:
         app.router.lifespan_context = original

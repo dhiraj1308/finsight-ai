@@ -52,16 +52,18 @@ async def lifespan(app: FastAPI):
     logger.info("FinSight AI startup: loading components (this may take ~10s)...")
     settings = get_settings()
     components = create_components(settings)
-    app.state.components = components
 
     # Build the agent once so session history persists across requests
     # and the Groq client is not re-created on every chat call.
-    app.state.agent = FinancialAgent(
+    # The agent is stored inside AppComponents so all application state
+    # lives in a single container at app.state.components.
+    components.agent = FinancialAgent(
         store=components.store,
         vector_store=components.vector_store,
         forecaster=components.forecaster,
         anomaly_detector=components.anomaly_detector,
     )
+    app.state.components = components
     logger.info("FinSight AI startup complete.")
 
     yield  # server is running — handle requests
@@ -249,11 +251,18 @@ async def get_forecast(category: str, days: int = Query(default=30, ge=1, le=365
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    # Use the shared agent cached at startup — preserves session history
-    # and avoids re-creating the Groq client on every request.
-    agent = getattr(app.state, "agent", None)
+    # Retrieve the agent from the unified AppComponents stored at startup.
+    # Fallback: build an agent on the fly when app.state.components is absent
+    # (e.g., integration tests that bypass the lifespan and inject components
+    # directly — they set components.agent to a MagicMock or a real agent).
+    components = getattr(app.state, "components", None)
+    if components is not None:
+        agent = components.agent
+    else:
+        agent = None
+
     if agent is None:
-        # Fallback: build agent on the fly (test/script usage without lifespan)
+        # Last-resort fallback for scripts/tests without lifespan or injected agent
         from agent.agent import FinancialAgent
         store, vector_store, _, anomaly_detector, forecaster = _get_components()
         agent = FinancialAgent(
