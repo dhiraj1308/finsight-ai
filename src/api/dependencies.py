@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Tuple
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -72,4 +76,78 @@ def create_components(settings) -> AppComponents:
         categorizer=categorizer,
         anomaly_detector=anomaly_detector,
         forecaster=forecaster,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Shared DTO helper
+# ---------------------------------------------------------------------------
+
+def _txn_to_dto(txn) -> "TransactionDTO":
+    """Convert a domain Transaction to a TransactionDTO.
+
+    Imported by transactions.py and anomalies.py routers.
+    Defined here to avoid duplication across routers.
+    The TYPE_CHECKING import keeps this module free of a hard api.models
+    dependency at the module level while still allowing the type hint.
+    """
+    from api.models import TransactionDTO  # local import — avoids circular at load time
+
+    return TransactionDTO(
+        id=txn.id,
+        date=txn.date,
+        merchant=txn.merchant,
+        amount=txn.amount,
+        category=txn.category,
+        is_anomaly=txn.is_anomaly,
+        anomaly_score=txn.anomaly_score,
+        needs_review=txn.needs_review,
+        source_file=txn.source_file,
+    )
+
+
+# ---------------------------------------------------------------------------
+# FastAPI component dependency
+# ---------------------------------------------------------------------------
+
+def get_components(request) -> Tuple:
+    """Return the shared component tuple from app.state.
+
+    Mirrors the behaviour of the former _get_components() in app.py:
+      - Primary path: reads app.state.components (set by the lifespan).
+      - Fallback path: constructs components on-the-fly for bare-script /
+        test usage where the lifespan was bypassed and app.state.components
+        was not set.
+
+    Returns a 5-tuple: (store, vector_store, categorizer, anomaly_detector, forecaster)
+
+    Usage in a router:
+        from fastapi import Depends, Request
+        from api.dependencies import get_components
+
+        @router.get("/example")
+        def handler(components=Depends(get_components)):
+            store, vector_store, categorizer, anomaly_detector, forecaster = components
+    """
+    components = getattr(request.app.state, "components", None)
+    if components is not None:
+        return (
+            components.store,
+            components.vector_store,
+            components.categorizer,
+            components.anomaly_detector,
+            components.forecaster,
+        )
+
+    # Fallback for tests / scripts that bypass the lifespan
+    from config import get_settings
+
+    settings = get_settings()
+    built = create_components(settings)
+    return (
+        built.store,
+        built.vector_store,
+        built.categorizer,
+        built.anomaly_detector,
+        built.forecaster,
     )
