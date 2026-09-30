@@ -6,7 +6,7 @@ from typing import Any
 import streamlit as st
 
 from frontend.services.api import APIClient, PasswordIncorrectError, PasswordRequiredError
-from frontend.utils import page_header
+from frontend.utils import navigate_to, page_header
 
 _ACCEPTED_TYPES = ["csv", "pdf"]
 _MAX_PASSWORD_ATTEMPTS = 5
@@ -73,6 +73,17 @@ def _show_result(result: dict[str, Any]) -> None:
         with st.expander(f"⚠️ Warnings ({len(warnings)})"):
             for warning in warnings:
                 st.warning(warning)
+
+    # ── Call-to-action buttons ────────────────────────────────────────────────
+    # Only shown when the result makes navigation meaningful (ingested or
+    # skipped > 0 means there is data in the store worth exploring).
+    if ingested > 0 or skipped > 0:
+        st.divider()
+        cta_cols = st.columns([1, 1, 2])
+        if cta_cols[0].button("📊 View Transactions", use_container_width=True):
+            navigate_to("Transactions")
+        if cta_cols[1].button("💰 Go to Dashboard", use_container_width=True):
+            navigate_to("Dashboard")
 
 
 def render(client: APIClient) -> None:

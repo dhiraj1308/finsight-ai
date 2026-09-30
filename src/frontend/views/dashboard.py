@@ -26,17 +26,21 @@ def _kpi_cards(
     transactions: list[dict[str, Any]],
     anomalies: list[dict[str, Any]],
 ) -> None:
-    """Render three KPI metric cards in equal-width columns."""
+    """Render four KPI metric cards in equal-width columns."""
     total_txns = len(transactions)
     total_anomalies = len(anomalies)
     unique_categories = len(
         {t.get("category") for t in transactions if t.get("category")}
     )
+    total_spending = sum(
+        float(t.get("amount", 0) or 0) for t in transactions
+    )
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Total Transactions", total_txns)
-    col2.metric("Total Anomalies", total_anomalies)
-    col3.metric("Categories", unique_categories)
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Total Spending", f"₹{total_spending:,.2f}")
+    col2.metric("Total Transactions", total_txns)
+    col3.metric("Total Anomalies", total_anomalies)
+    col4.metric("Categories", unique_categories)
 
 
 def _recent_transactions(transactions: list[dict[str, Any]]) -> None:
