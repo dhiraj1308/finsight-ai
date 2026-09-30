@@ -63,7 +63,7 @@ def create_components(settings) -> AppComponents:
     )
 
     categorizer = Categorizer()
-    model_path = Path("data/processed/categorizer.joblib")
+    model_path = Path(settings.CATEGORIZER_MODEL_PATH)
     if model_path.exists():
         categorizer.load(model_path)
 

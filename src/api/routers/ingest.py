@@ -24,6 +24,7 @@ async def ingest(
     from ingestion.pdf_parser import PDFParser
     from api.services.ingest_service import IngestService
     from api.dependencies import get_components
+    from config import get_settings
 
     filename = file.filename or ""
     if not (filename.endswith(".csv") or filename.endswith(".pdf")):
@@ -68,7 +69,8 @@ async def ingest(
         safe_filename = Path(filename).name
         if not safe_filename:
             raise HTTPException(status_code=422, detail="Invalid filename.")
-        tmp_path = Path("data/raw") / safe_filename
+        settings = get_settings()
+        tmp_path = Path(settings.CSV_UPLOAD_DIR) / safe_filename
         tmp_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path.write_bytes(content)
 
