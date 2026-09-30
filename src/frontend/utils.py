@@ -21,23 +21,20 @@ def page_header(title: str, subtitle: str | None = None) -> None:
 
 
 def navigate_to(page: str) -> None:
-    """Switch to *page* using ``st.switch_page`` when available.
+    """Switch to *page* by updating the radio widget's stored state.
 
-    Falls back to storing the selection in ``st.session_state["page"]`` so
-    that ``app.py`` can pick it up on the next rerun when the Streamlit
-    version pre-dates ``st.switch_page`` (added in 1.31).
+    ``app.py`` routes based on the value returned by ``st.radio(...,
+    key="nav_radio")``.  Streamlit keyed-radio widgets return
+    ``session_state["nav_radio"]`` on every rerun once state is stored, so
+    setting that key before calling ``st.rerun()`` is the only reliable way
+    to change the active page from code.  ``session_state["page"]`` is also
+    updated for consistency (it mirrors the rendered page after each run).
 
     Parameters
     ----------
     page:
         The page label matching a key in ``app._PAGES``, e.g. ``"Upload"``.
     """
-    if hasattr(st, "switch_page"):
-        # st.switch_page expects a page file path relative to the app root
-        # when using file-based MPA, but in our single-file routing pattern
-        # we instead update session state and rerun so app.py re-dispatches.
-        st.session_state["page"] = page
-        st.rerun()
-    else:
-        st.session_state["page"] = page
-        st.rerun()
+    st.session_state["nav_radio"] = page
+    st.session_state["page"] = page
+    st.rerun()
