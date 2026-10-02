@@ -211,14 +211,30 @@ class FinancialAgent:
         lines.append("")  # trailing blank line for visual separation
         return "\n".join(lines)
 
-    def _call_llm(self, prompt: str, max_tokens: int = 512) -> str:
-        """Call the Groq LLM and return the content string."""
-        resp = self._client.chat.completions.create(
+    def _call_llm(self, prompt: str, max_tokens: int = 512, json_mode: bool = False) -> str:
+        """Call the Groq LLM and return the content string.
+
+        Parameters
+        ----------
+        prompt:
+            The full prompt text sent as a user message.
+        max_tokens:
+            Maximum tokens to generate.
+        json_mode:
+            When True, passes ``response_format={"type": "json_object"}`` to
+            the API so the model is constrained to return valid JSON.  Use
+            only for the tool-selection (dispatch) call — not for the
+            answer-synthesis call which must return natural-language prose.
+        """
+        kwargs = dict(
             model=self._model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=max_tokens,
         )
+        if json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
+        resp = self._client.chat.completions.create(**kwargs)
         return resp.choices[0].message.content or ""
 
     def _dispatch(self, question: str, history_context: str) -> tuple[str, str]:
@@ -231,7 +247,7 @@ class FinancialAgent:
             history_context=history_context,
             question=question,
         )
-        raw = self._call_llm(prompt, max_tokens=150).strip()
+        raw = self._call_llm(prompt, max_tokens=150, json_mode=True).strip()
         logger.info("[dispatch] raw LLM reply: %r", raw)
 
         # Extract the first JSON object from the response

@@ -441,3 +441,249 @@ def test_gate_rejection_does_not_pollute_history():
     assert "gate-8" not in agent._session_history, (
         "Rejected out-of-scope message must not appear in session history"
     )
+
+
+# ---------------------------------------------------------------------------
+# JSON-mode dispatch tests (Task: fix unquoted-key LLM output)
+#
+# These tests cover the runtime failure where openai/gpt-oss-20b returned
+# JavaScript-style object literals with unquoted keys:
+#   {tool: get_spending_summary, args: {category: "all"}}
+# which caused json.loads() to raise JSONDecodeError, _dispatch() to return
+# ("none", "") and the agent to reply "I could not retrieve relevant data."
+#
+# The fix: _call_llm(..., json_mode=True) is passed for the dispatch step,
+# which forces response_format={"type": "json_object"} on the API call,
+# guaranteeing valid double-quoted JSON in the response.
+# ---------------------------------------------------------------------------
+
+
+def _stub_llm_with_side_effects(agent, side_effects: list):
+    """Set arbitrary side_effect list on the mock LLM client."""
+    completions = []
+    for content in side_effects:
+        m = MagicMock()
+        m.choices[0].message.content = content
+        completions.append(m)
+    agent._client.chat.completions.create.side_effect = completions
+
+
+# ---------------------------------------------------------------------------
+# TEST A — valid JSON-mode output (double-quoted keys) is parsed successfully
+# and the selected tool is invoked.
+# ---------------------------------------------------------------------------
+
+def test_dispatch_parses_valid_json_mode_output_and_calls_tool():
+    """
+    A. Dispatch call returns proper double-quoted JSON (as produced by
+       json_mode=True / response_format={"type":"json_object"}).
+
+    Verifies:
+    - json.loads() succeeds on the response
+    - The named tool is looked up and called with the supplied args
+    - The tool result reaches chat()'s answer synthesis step
+    - The final reply is NOT the canned 'could not retrieve' fallback
+    """
+    agent = _make_agent()
+    agent._tools["get_spending_summary"] = MagicMock(
+        return_value="Total: Rs.210564.00 across 45 transactions."
+    )
+
+    _stub_llm_with_side_effects(agent, [
+        # Dispatch reply — valid JSON as json_mode forces
+        '{"tool": "get_spending_summary", "args": {"category": "all"}}',
+        # Synthesis reply
+        "You spent Rs.210564.00 in total across 45 transactions.",
+    ])
+
+    result = agent.chat("How much did I spend in total?", session_id="jm-a")
+
+    # Tool must have been called
+    agent._tools["get_spending_summary"].assert_called_once_with(category="all")
+    # Answer must contain the tool data, not the canned fallback
+    assert "210564" in result
+    assert "could not retrieve" not in result.lower()
+
+
+# ---------------------------------------------------------------------------
+# TEST B — dispatch actually invokes the selected tool with correct args
+# ---------------------------------------------------------------------------
+
+def test_dispatch_invokes_tool_with_correct_args():
+    """
+    B. When the LLM selects a tool with specific args, _dispatch() calls
+       that exact tool callable with those args unpacked as keyword arguments.
+    """
+    agent = _make_agent()
+    tool_mock = MagicMock(return_value="Dining total: Rs.4500.")
+    agent._tools["get_spending_summary"] = tool_mock
+
+    _stub_llm_with_side_effects(agent, [
+        '{"tool": "get_spending_summary", "args": {"category": "Dining"}}',
+        "You spent Rs.4500 on Dining.",
+    ])
+
+    agent.chat("How much did I spend on dining?", session_id="jm-b")
+
+    tool_mock.assert_called_once_with(category="Dining")
+
+
+# ---------------------------------------------------------------------------
+# TEST C — answer-synthesis LLM call does NOT receive response_format
+# ---------------------------------------------------------------------------
+
+def test_synthesize_call_does_not_use_json_mode():
+    """
+    C. The answer-synthesis (second) LLM call must NOT pass
+       response_format={"type": "json_object"} — it should return prose.
+
+    Verifies that only the dispatch call (first) carries response_format,
+    and the synthesis call (second) carries no response_format key.
+    """
+    agent = _make_agent()
+    agent._tools["get_spending_summary"] = MagicMock(
+        return_value="Total: Rs.1000."
+    )
+
+    _stub_llm_with_side_effects(agent, [
+        '{"tool": "get_spending_summary", "args": {"category": "all"}}',
+        "You spent Rs.1000.",
+    ])
+
+    agent.chat("How much did I spend?", session_id="jm-c")
+
+    calls = agent._client.chat.completions.create.call_args_list
+    assert len(calls) == 2, f"Expected 2 LLM calls, got {len(calls)}"
+
+    # First call (dispatch) must carry response_format
+    dispatch_kwargs = calls[0][1]
+    assert "response_format" in dispatch_kwargs, (
+        "Dispatch call must pass response_format for json_mode"
+    )
+    assert dispatch_kwargs["response_format"] == {"type": "json_object"}
+
+    # Second call (synthesis) must NOT carry response_format
+    synthesis_kwargs = calls[1][1]
+    assert "response_format" not in synthesis_kwargs, (
+        "Synthesis call must NOT pass response_format — it returns prose"
+    )
+
+
+# ---------------------------------------------------------------------------
+# TEST D — existing malformed/invalid tool handling still works
+# ---------------------------------------------------------------------------
+
+def test_dispatch_handles_unknown_tool_name_gracefully():
+    """
+    D-1. When the LLM returns valid JSON but names a tool not in the registry,
+         _dispatch() returns ("none", "") and the agent answers directly
+         without crashing.
+    """
+    agent = _make_agent()
+
+    _stub_llm_with_side_effects(agent, [
+        '{"tool": "nonexistent_tool", "args": {}}',
+        "I couldn't find relevant data.",
+    ])
+
+    # Must not raise
+    result = agent.chat("How much did I spend?", session_id="jm-d1")
+    assert isinstance(result, str)
+    assert len(result) > 0
+
+
+def test_dispatch_handles_tool_none_gracefully():
+    """
+    D-2. When the LLM returns {"tool": "none", ...}, _dispatch() returns
+         ("none", "") and the agent falls through to a direct LLM answer.
+    """
+    agent = _make_agent()
+
+    _stub_llm_with_side_effects(agent, [
+        '{"tool": "none", "args": {}}',
+        "I don't have enough information to answer that.",
+    ])
+
+    result = agent.chat("How much did I spend?", session_id="jm-d2")
+    assert isinstance(result, str)
+    assert "could not retrieve" not in result.lower()
+
+
+def test_dispatch_handles_json_missing_tool_key_gracefully():
+    """
+    D-3. Valid JSON but missing the 'tool' key → defaults to "none", no crash.
+    """
+    agent = _make_agent()
+
+    _stub_llm_with_side_effects(agent, [
+        '{"args": {}}',   # no "tool" key
+        "Direct answer.",
+    ])
+
+    result = agent.chat("How much did I spend?", session_id="jm-d3")
+    assert isinstance(result, str)
+
+
+def test_dispatch_handles_empty_llm_response_gracefully():
+    """
+    D-4. When _call_llm returns an empty string (edge case), _dispatch()
+         returns ("none", "") without crashing.
+    """
+    agent = _make_agent()
+
+    _stub_llm_with_side_effects(agent, [
+        "",              # empty dispatch response
+        "Direct answer.",
+    ])
+
+    result = agent.chat("How much did I spend?", session_id="jm-d4")
+    assert isinstance(result, str)
+
+
+# ---------------------------------------------------------------------------
+# TEST E — real-style financial question dispatches to the right tool
+#          and does NOT produce the canned fallback response
+# ---------------------------------------------------------------------------
+
+def test_real_financial_question_dispatches_to_spending_summary():
+    """
+    E. End-to-end: "How much did I spend in total?" →
+       - finance gate: passes (contains 'spend')
+       - dispatch LLM call: returns valid JSON selecting get_spending_summary
+       - tool called: returns real-looking data
+       - synthesis: returns an answer containing the data
+       - final reply: contains the spending figure, NOT the canned fallback
+
+    This directly validates the fix for the production bug where the LLM's
+    unquoted-key output caused all chat responses to fall through to
+    "I could not retrieve relevant data. Please try rephrasing."
+    """
+    agent = _make_agent()
+    agent._tools["get_spending_summary"] = MagicMock(
+        return_value=(
+            "Total: Rs.210564.00 across 45 transactions. By category:\n"
+            "  Other: Rs.210564.00 (45 txns)"
+        )
+    )
+
+    _stub_llm_with_side_effects(agent, [
+        # This is what json_mode now guarantees — valid double-quoted JSON
+        '{"tool": "get_spending_summary", "args": {"category": "all"}}',
+        "You have spent Rs.210,564.00 in total across 45 transactions.",
+    ])
+
+    result = agent.chat("How much did I spend in total?", session_id="jm-e")
+
+    # The tool must have been dispatched
+    agent._tools["get_spending_summary"].assert_called_once()
+
+    # The answer must contain the actual data
+    assert "210" in result, f"Expected spending figure in answer, got: {result!r}"
+
+    # The canned fallback must NOT appear
+    assert result != "I could not retrieve relevant data. Please try rephrasing.", (
+        "chat() must not fall through to the canned fallback when dispatch succeeds"
+    )
+    assert "could not retrieve" not in result.lower(), (
+        f"Unexpected fallback response: {result!r}"
+    )
