@@ -123,6 +123,30 @@ class TransactionStore:
             ).fetchall()
         return [self._row_to_transaction(row) for row in rows]
 
+    def update_anomaly_scores(
+        self, updates: list[tuple[int, bool, float]]
+    ) -> None:
+        """Update is_anomaly and anomaly_score for a batch of transactions.
+
+        Parameters
+        ----------
+        updates:
+            A list of (transaction_id, is_anomaly, anomaly_score) tuples.
+            An empty list is handled safely (no database interaction).
+        """
+        if not updates:
+            return
+        with self._get_connection() as conn:
+            for transaction_id, is_anomaly, anomaly_score in updates:
+                conn.execute(
+                    """
+                    UPDATE transactions
+                    SET is_anomaly = ?, anomaly_score = ?
+                    WHERE id = ?
+                    """,
+                    (int(is_anomaly), float(anomaly_score), transaction_id),
+                )
+
     def delete(self, transaction_id: int) -> None:
         with self._get_connection() as conn:
             conn.execute(

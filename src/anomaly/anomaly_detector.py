@@ -61,21 +61,16 @@ class AnomalyDetector:
 
         # Update every transaction in the store
         anomaly_count = 0
-        with store._get_connection() as conn:
-            for txn, score, prediction in zip(
-                transactions, normalized_scores, predictions
-            ):
-                is_anomaly = prediction == -1
-                if is_anomaly:
-                    anomaly_count += 1
-                conn.execute(
-                    """
-                    UPDATE transactions
-                    SET is_anomaly = ?, anomaly_score = ?
-                    WHERE id = ?
-                    """,
-                    (int(is_anomaly), float(score), txn.id),
-                )
+        updates: list[tuple[int, bool, float]] = []
+        for txn, score, prediction in zip(
+            transactions, normalized_scores, predictions
+        ):
+            is_anomaly = prediction == -1
+            if is_anomaly:
+                anomaly_count += 1
+            updates.append((txn.id, is_anomaly, float(score)))
+
+        store.update_anomaly_scores(updates)
 
         return anomaly_count
 

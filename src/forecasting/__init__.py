@@ -1,1 +1,1 @@
-﻿from .forecaster import Forecaster, Forecast, ForecastPoint
+from .forecaster import Forecaster, Forecast, ForecastPoint

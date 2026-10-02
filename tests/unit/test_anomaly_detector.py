@@ -125,3 +125,62 @@ def test_get_anomalies_returns_empty_list_when_none_flagged(tmp_path):
     # Don't run fit_and_score — no anomalies flagged yet
     anomalies = detector.get_anomalies(store)
     assert anomalies == []
+
+
+# ---------------------------------------------------------------------------
+# Architectural coupling test — AnomalyDetector must not call store._get_connection
+# ---------------------------------------------------------------------------
+
+def test_fit_and_score_does_not_access_private_get_connection(tmp_path):
+    """
+    AnomalyDetector.fit_and_score() must use the public
+    TransactionStore.update_anomaly_scores() API rather than calling
+    store._get_connection() directly.
+
+    We verify this by monkey-patching update_anomaly_scores to track calls,
+    and confirming the method was invoked with a non-empty update list —
+    which proves the new public API is being used.
+
+    We also confirm that no direct reference to _get_connection appears in
+    AnomalyDetector's source.
+    """
+    import inspect
+    import anomaly.anomaly_detector as _mod
+
+    # Source-level check: _get_connection must not appear in the module source
+    source = inspect.getsource(_mod)
+    assert "_get_connection" not in source, (
+        "AnomalyDetector source must not reference store._get_connection(); "
+        "it must use store.update_anomaly_scores() instead."
+    )
+
+    # Behavioural check: update_anomaly_scores is called with real data
+    store = _make_store(tmp_path, n=50)
+    detector = AnomalyDetector()
+
+    captured_updates: list = []
+    original_update = store.update_anomaly_scores
+
+    def _capture(updates):
+        captured_updates.extend(updates)
+        return original_update(updates)
+
+    store.update_anomaly_scores = _capture
+
+    try:
+        count = detector.fit_and_score(store)
+    finally:
+        store.update_anomaly_scores = original_update
+
+    assert isinstance(count, int) and count >= 0
+    assert len(captured_updates) == 50, (
+        f"Expected 50 update tuples (one per transaction), got {len(captured_updates)}"
+    )
+    # Each tuple must be (int, bool-like, float)
+    import numpy as np
+    for txn_id, is_anomaly, score in captured_updates:
+        assert isinstance(txn_id, int)
+        # numpy.bool_ is the expected type from IsolationForest predict; accept it
+        assert isinstance(is_anomaly, (bool, np.bool_))
+        assert isinstance(score, float)
+        assert 0.0 <= score <= 1.0
