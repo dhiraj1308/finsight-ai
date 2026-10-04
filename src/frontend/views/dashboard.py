@@ -159,6 +159,156 @@ def _spending_behavior(transactions: list[dict[str, Any]]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Financial Insights
+# ---------------------------------------------------------------------------
+
+def _compute_insights(
+    transactions: list[dict[str, Any]],
+    anomalies: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Compute deterministic financial insights from already-fetched data.
+
+    All calculations use expense-only transactions (income excluded via
+    ``_is_income()``).  The anomaly count comes directly from the anomalies
+    list, which is already loaded by ``render()``.
+
+    Returns a dict with keys:
+        top_category      str | None
+        top_category_amt  float
+        top_category_pct  float          # % of total expense spending
+        top_merchant      str | None
+        top_merchant_amt  float
+        largest_merchant  str | None
+        largest_amount    float
+        largest_date      str            # ISO date string, "" if none
+        anomaly_count     int
+    """
+    from collections import defaultdict
+
+    expense = [t for t in transactions if not _is_income(t)]
+
+    # Category totals
+    cat_totals: dict[str, float] = defaultdict(float)
+    for t in expense:
+        amt = float(t.get("amount", 0) or 0)
+        if amt > 0:
+            cat_totals[str(t.get("category") or "")] += amt
+
+    total_spend = sum(cat_totals.values())
+
+    if cat_totals:
+        top_cat = max(cat_totals, key=cat_totals.__getitem__)
+        top_cat_amt = cat_totals[top_cat]
+        top_cat_pct = top_cat_amt / total_spend * 100 if total_spend else 0.0
+    else:
+        top_cat = None
+        top_cat_amt = 0.0
+        top_cat_pct = 0.0
+
+    # Merchant totals
+    merch_totals: dict[str, float] = defaultdict(float)
+    for t in expense:
+        amt = float(t.get("amount", 0) or 0)
+        if amt > 0:
+            merch_totals[str(t.get("merchant") or "")] += amt
+
+    if merch_totals:
+        top_merch = max(merch_totals, key=merch_totals.__getitem__)
+        top_merch_amt = merch_totals[top_merch]
+    else:
+        top_merch = None
+        top_merch_amt = 0.0
+
+    # Largest single expense transaction
+    positive_expense = [t for t in expense if float(t.get("amount", 0) or 0) > 0]
+    if positive_expense:
+        largest = max(positive_expense, key=lambda t: float(t.get("amount", 0) or 0))
+        largest_merchant = str(largest.get("merchant") or "")
+        largest_amount = float(largest.get("amount", 0) or 0)
+        largest_date = str(largest.get("date") or "")
+    else:
+        largest_merchant = None
+        largest_amount = 0.0
+        largest_date = ""
+
+    return {
+        "top_category": top_cat,
+        "top_category_amt": top_cat_amt,
+        "top_category_pct": top_cat_pct,
+        "top_merchant": top_merch,
+        "top_merchant_amt": top_merch_amt,
+        "largest_merchant": largest_merchant,
+        "largest_amount": largest_amount,
+        "largest_date": largest_date,
+        "anomaly_count": len(anomalies),
+    }
+
+
+def _financial_insights(
+    transactions: list[dict[str, Any]],
+    anomalies: list[dict[str, Any]],
+) -> None:
+    """Render the Financial Insights section.
+
+    Interprets the existing transaction and anomaly data for the user using
+    four deterministic insights: top spending category, top merchant, largest
+    single expense, and anomaly count.  No additional API calls are made —
+    both lists are already fetched by ``render()``.
+    """
+    st.subheader("💡 Financial Insights")
+
+    expense = [t for t in transactions if not _is_income(t)]
+    if not expense:
+        st.info("Upload a bank statement to see financial insights.")
+        return
+
+    ins = _compute_insights(transactions, anomalies)
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    # ── 1. Top spending category ──────────────────────────────────────────
+    with col1:
+        st.markdown("**Highest Spending Category**")
+        if ins["top_category"]:
+            st.markdown(f"### {ins['top_category']}")
+            st.markdown(f"₹{ins['top_category_amt']:,.2f}")
+            st.caption(f"{ins['top_category_pct']:.1f}% of total spending")
+        else:
+            st.caption("No expense data")
+
+    # ── 2. Top merchant ───────────────────────────────────────────────────
+    with col2:
+        st.markdown("**Top Merchant**")
+        if ins["top_merchant"]:
+            st.markdown(f"### {ins['top_merchant']}")
+            st.markdown(f"₹{ins['top_merchant_amt']:,.2f}")
+        else:
+            st.caption("No expense data")
+
+    # ── 3. Largest single expense ─────────────────────────────────────────
+    with col3:
+        st.markdown("**Largest Expense**")
+        if ins["largest_merchant"]:
+            st.markdown(f"### {ins['largest_merchant']}")
+            st.markdown(f"₹{ins['largest_amount']:,.2f}")
+            st.caption(ins["largest_date"])
+        else:
+            st.caption("No expense data")
+
+    # ── 4. Anomalies ──────────────────────────────────────────────────────
+    with col4:
+        st.markdown("**Anomalies Flagged**")
+        count = ins["anomaly_count"]
+        st.markdown(f"### {count}")
+        if count == 0:
+            st.caption("No unusual transactions")
+        elif count == 1:
+            st.caption("1 transaction flagged")
+        else:
+            st.caption(f"{count} transactions flagged")
+
+
+# ---------------------------------------------------------------------------
 # Next-Month Spending Forecast
 # ---------------------------------------------------------------------------
 
@@ -315,13 +465,17 @@ def render(client: APIClient) -> None:
     _spending_behavior(transactions)
     st.divider()
 
-    # ── 3. Next-Month Forecast ────────────────────────────────────────────
+    # ── 3. Financial Insights ─────────────────────────────────────────────
+    _financial_insights(transactions, anomalies)
+    st.divider()
+
+    # ── 4. Next-Month Forecast ────────────────────────────────────────────
     _next_month_forecast(client)
     st.divider()
 
-    # ── 4. Recent Transactions ────────────────────────────────────────────
+    # ── 5. Recent Transactions ────────────────────────────────────────────
     _recent_transactions(transactions)
     st.divider()
 
-    # ── 5. Quick Actions ─────────────────────────────────────────────────
+    # ── 6. Quick Actions ─────────────────────────────────────────────────
     _quick_actions()

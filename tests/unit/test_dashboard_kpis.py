@@ -583,3 +583,238 @@ class TestNextMonthForecast:
         mock_st = self._call_forecast(client)
         mock_st.info.assert_called_once()
         mock_st.line_chart.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TEST GROUP 8 — _compute_insights()
+# ---------------------------------------------------------------------------
+
+class TestComputeInsights:
+    """Unit tests for the _compute_insights() pure-data helper."""
+
+    def _call(self, transactions, anomalies=None):
+        if anomalies is None:
+            anomalies = []
+        for dep in list(sys.modules):
+            if dep.startswith("frontend."):
+                del sys.modules[dep]
+        sys.modules.setdefault("frontend.services.api", MagicMock())
+        sys.modules.setdefault("frontend.utils", MagicMock())
+        mock_st = MagicMock()
+        with patch.dict(sys.modules, {"streamlit": mock_st}):
+            import frontend.views.dashboard as dash_mod
+            dash_mod.st = mock_st
+            return dash_mod._compute_insights(transactions, anomalies)
+
+    def _txn(self, merchant, amount, category, date_str="2026-09-01"):
+        return {"merchant": merchant, "amount": amount,
+                "category": category, "date": date_str}
+
+    # ------------------------------------------------------------------
+    # Top category
+    # ------------------------------------------------------------------
+
+    def test_top_category_correct(self):
+        """Highest-spend category is identified correctly."""
+        txns = [
+            self._txn("Amazon", 5000.0, "Shopping"),
+            self._txn("Swiggy", 1000.0, "Dining"),
+            self._txn("FreshMart", 2000.0, "Groceries"),
+        ]
+        ins = self._call(txns)
+        assert ins["top_category"] == "Shopping"
+        assert ins["top_category_amt"] == pytest.approx(5000.0)
+
+    def test_top_category_percentage_correct(self):
+        """top_category_pct = top amount / total × 100."""
+        txns = [
+            self._txn("Amazon", 3000.0, "Shopping"),
+            self._txn("Uber", 1000.0, "Transport"),
+        ]
+        ins = self._call(txns)
+        assert ins["top_category_pct"] == pytest.approx(75.0)
+
+    def test_top_category_excludes_income(self):
+        """Income rows (Salary Credit) must not inflate any category."""
+        txns = [
+            self._txn("Salary Credit", 65000.0, "Other"),
+            self._txn("Swiggy",        500.0,   "Dining"),
+        ]
+        ins = self._call(txns)
+        # Top category must be Dining (500), not Other (income 65000)
+        assert ins["top_category"] == "Dining"
+        assert ins["top_category_amt"] == pytest.approx(500.0)
+        # Percentage must be 100% (only expense category)
+        assert ins["top_category_pct"] == pytest.approx(100.0)
+
+    def test_top_category_none_when_only_income(self):
+        """If all transactions are income, top_category must be None."""
+        txns = [self._txn("Salary Credit", 65000.0, "Other")]
+        ins = self._call(txns)
+        assert ins["top_category"] is None
+        assert ins["top_category_amt"] == pytest.approx(0.0)
+
+    def test_top_category_none_when_empty(self):
+        ins = self._call([])
+        assert ins["top_category"] is None
+
+    # ------------------------------------------------------------------
+    # Top merchant
+    # ------------------------------------------------------------------
+
+    def test_top_merchant_correct(self):
+        """Top merchant by cumulative spend across multiple rows."""
+        txns = [
+            self._txn("Amazon", 2000.0, "Shopping"),
+            self._txn("Amazon", 3000.0, "Shopping"),   # same merchant, two rows
+            self._txn("Swiggy", 4000.0, "Dining"),
+        ]
+        ins = self._call(txns)
+        # Amazon 5000 > Swiggy 4000
+        assert ins["top_merchant"] == "Amazon"
+        assert ins["top_merchant_amt"] == pytest.approx(5000.0)
+
+    def test_top_merchant_excludes_income(self):
+        """Salary Credit must not be the top merchant."""
+        txns = [
+            self._txn("Salary Credit", 65000.0, "Other"),
+            self._txn("Rent",           18000.0, "Other"),
+        ]
+        ins = self._call(txns)
+        assert ins["top_merchant"] == "Rent"
+        assert ins["top_merchant_amt"] == pytest.approx(18000.0)
+
+    def test_top_merchant_none_when_only_income(self):
+        txns = [self._txn("Salary Credit", 65000.0, "Other")]
+        ins = self._call(txns)
+        assert ins["top_merchant"] is None
+
+    # ------------------------------------------------------------------
+    # Largest expense
+    # ------------------------------------------------------------------
+
+    def test_largest_expense_correct(self):
+        """Largest single transaction is identified correctly."""
+        txns = [
+            self._txn("Rent",    18000.0, "Other",    "2026-08-31"),
+            self._txn("Amazon",   1899.0, "Shopping", "2026-09-01"),
+            self._txn("FreshMart", 2450.0, "Groceries", "2026-09-05"),
+        ]
+        ins = self._call(txns)
+        assert ins["largest_merchant"] == "Rent"
+        assert ins["largest_amount"] == pytest.approx(18000.0)
+        assert ins["largest_date"] == "2026-08-31"
+
+    def test_largest_expense_excludes_income(self):
+        """Income must not be considered as a large expense."""
+        txns = [
+            self._txn("Salary Credit", 65000.0, "Other", "2026-09-01"),
+            self._txn("Rent",           18000.0, "Other", "2026-08-31"),
+        ]
+        ins = self._call(txns)
+        assert ins["largest_merchant"] == "Rent"
+        assert ins["largest_amount"] == pytest.approx(18000.0)
+
+    def test_largest_expense_none_when_only_income(self):
+        txns = [self._txn("Salary Credit", 65000.0, "Other")]
+        ins = self._call(txns)
+        assert ins["largest_merchant"] is None
+
+    # ------------------------------------------------------------------
+    # Anomaly count
+    # ------------------------------------------------------------------
+
+    def test_anomaly_count_from_anomalies_list(self):
+        """anomaly_count equals len(anomalies) passed in."""
+        txns = [self._txn("Swiggy", 500.0, "Dining")]
+        anomalies = [{"id": 1}, {"id": 2}, {"id": 3}]
+        ins = self._call(txns, anomalies)
+        assert ins["anomaly_count"] == 3
+
+    def test_anomaly_count_zero_when_no_anomalies(self):
+        txns = [self._txn("Swiggy", 500.0, "Dining")]
+        ins = self._call(txns, [])
+        assert ins["anomaly_count"] == 0
+
+    def test_anomaly_count_unaffected_by_transactions(self):
+        """Anomaly count must not change based on what's in transactions."""
+        txns = [self._txn("Amazon", 5000.0, "Shopping")]
+        ins_0 = self._call(txns, [])
+        ins_3 = self._call(txns, [{"id": i} for i in range(3)])
+        assert ins_0["anomaly_count"] == 0
+        assert ins_3["anomaly_count"] == 3
+
+    # ------------------------------------------------------------------
+    # Empty input
+    # ------------------------------------------------------------------
+
+    def test_empty_transactions_does_not_raise(self):
+        """Empty transaction list must return a valid (all-None/zero) dict."""
+        ins = self._call([])
+        assert ins["top_category"] is None
+        assert ins["top_merchant"] is None
+        assert ins["largest_merchant"] is None
+        assert ins["top_category_amt"] == pytest.approx(0.0)
+        assert ins["anomaly_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# TEST GROUP 9 — _financial_insights() rendering
+# ---------------------------------------------------------------------------
+
+class TestFinancialInsightsRendering:
+    """Verify _financial_insights() renders without crash and shows the right sections."""
+
+    def _call_render(self, transactions, anomalies=None):
+        if anomalies is None:
+            anomalies = []
+        for dep in list(sys.modules):
+            if dep.startswith("frontend."):
+                del sys.modules[dep]
+        sys.modules.setdefault("frontend.services.api", MagicMock())
+        sys.modules.setdefault("frontend.utils", MagicMock())
+        mock_st = _make_mock_st()
+        with patch.dict(sys.modules, {"streamlit": mock_st}):
+            import frontend.views.dashboard as dash_mod
+        dash_mod.st = mock_st
+        dash_mod._financial_insights(transactions, anomalies)
+        return mock_st
+
+    def test_shows_info_when_no_expense_data(self):
+        """Only-income data must show an info message."""
+        txns = [{"merchant": "Salary Credit", "amount": 65000.0,
+                 "category": "Other", "date": "2026-09-01"}]
+        mock_st = self._call_render(txns)
+        mock_st.info.assert_called_once()
+
+    def test_renders_four_columns_for_expense_data(self):
+        """st.columns(4) must be called when expense data is present."""
+        txns = [{"merchant": "Swiggy", "amount": 500.0,
+                 "category": "Dining", "date": "2026-09-01"}]
+        mock_st = self._call_render(txns)
+        # columns(4) must have been called
+        calls = [c for c in mock_st.columns.call_args_list
+                 if c.args and c.args[0] == 4]
+        assert len(calls) >= 1, "st.columns(4) must be called for the insight grid"
+
+    def test_does_not_raise_on_empty_input(self):
+        """Empty lists must render without exception (shows info message)."""
+        mock_st = self._call_render([], [])
+        mock_st.info.assert_called_once()
+
+    def test_does_not_raise_with_real_dataset_shape(self):
+        """Dataset matching the 45-transaction shape must not crash."""
+        txns = [
+            {"merchant": "Salary Credit",    "amount": 65000.0, "category": "Other",    "date": "2026-08-01"},
+            {"merchant": "Salary Credit",    "amount": 65000.0, "category": "Other",    "date": "2026-09-01"},
+            {"merchant": "Rent",             "amount": 18000.0, "category": "Other",    "date": "2026-08-31"},
+            {"merchant": "Amazon",           "amount":  1899.0, "category": "Shopping", "date": "2026-08-05"},
+            {"merchant": "FreshMart",        "amount":  2450.5, "category": "Groceries","date": "2026-08-02"},
+            {"merchant": "Swiggy",           "amount":   680.0, "category": "Dining",   "date": "2026-08-03"},
+            {"merchant": "Electricity Board","amount":  1850.0, "category": "Utilities","date": "2026-08-10"},
+        ]
+        anomalies = [{"id": 1, "merchant": "Rent", "amount": 18000.0,
+                      "anomaly_score": 0.7, "category": "Other"}]
+        mock_st = self._call_render(txns, anomalies)
+        # Must not have raised — info must NOT be called (there is expense data)
+        mock_st.info.assert_not_called()
