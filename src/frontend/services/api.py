@@ -346,6 +346,38 @@ class APIClient:
 
         return self._get(f"/forecast/{category}", params={"days": days})
 
+    def get_forecast_aggregate(self, days: int = 30) -> dict[str, Any]:
+        """
+        Retrieve a total-expense spending forecast from ``/forecast/aggregate``.
+
+        Forecasts aggregate daily expense spending across ALL non-income
+        categories using the same EWMA + linear trend algorithm as the
+        per-category endpoint.  Income transactions (salary, credit, etc.)
+        are excluded by the backend.
+
+        Parameters
+        ----------
+        days:
+            Forecast horizon in days (1–365, default 30).
+
+        Returns
+        -------
+        dict
+            Parsed :class:`ForecastDTO` payload with ``category='Total Expenses'``,
+            ``horizon_days``, and ``points``.
+
+        Raises
+        ------
+        ValueError
+            If *days* is outside the accepted range [1, 365].
+        RuntimeError
+            On network or server errors (including insufficient history).
+        """
+        if not 1 <= days <= 365:
+            raise ValueError(f"'days' must be between 1 and 365, got {days}.")
+
+        return self._get("/forecast/aggregate", params={"days": days})
+
     def chat(self, message: str, session_id: str) -> dict[str, str]:
         """
         Send a natural-language message to the AI agent via ``/chat``.

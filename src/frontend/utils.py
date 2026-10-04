@@ -3,6 +3,12 @@ from __future__ import annotations
 
 import streamlit as st
 
+# Session-state key used to communicate a requested navigation destination
+# from page code back to app.py's routing loop.  Using a dedicated "pending"
+# key avoids writing to the nav_radio widget key after widget instantiation,
+# which Streamlit forbids and raises StreamlitAPIException.
+_PENDING_NAV_KEY = "_pending_page"
+
 
 def page_header(title: str, subtitle: str | None = None) -> None:
     """Render a standardised page header used by every page.
@@ -21,20 +27,17 @@ def page_header(title: str, subtitle: str | None = None) -> None:
 
 
 def navigate_to(page: str) -> None:
-    """Switch to *page* by updating the radio widget's stored state.
+    """Request programmatic navigation to *page* on the next Streamlit rerun.
 
-    ``app.py`` routes based on the value returned by ``st.radio(...,
-    key="nav_radio")``.  Streamlit keyed-radio widgets return
-    ``session_state["nav_radio"]`` on every rerun once state is stored, so
-    setting that key before calling ``st.rerun()`` is the only reliable way
-    to change the active page from code.  ``session_state["page"]`` is also
-    updated for consistency (it mirrors the rendered page after each run).
+    Records the destination in ``st.session_state["_pending_page"]`` and
+    triggers an immediate rerun.  ``app.py`` consumes this key *before*
+    instantiating the ``nav_radio`` widget, so the radio is never written to
+    after creation — avoiding ``StreamlitAPIException``.
 
     Parameters
     ----------
     page:
         The page label matching a key in ``app._PAGES``, e.g. ``"Upload"``.
     """
-    st.session_state["nav_radio"] = page
-    st.session_state["page"] = page
+    st.session_state[_PENDING_NAV_KEY] = page
     st.rerun()

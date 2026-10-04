@@ -24,14 +24,46 @@ class SyntheticGenerator:
 
     # category -> list of realistic merchant names
     MERCHANTS: dict[str, list[str]] = {
-        "Groceries": ["Whole Foods", "Trader Joe's", "Safeway", "Kroger", "Local Mart"],
-        "Utilities": ["City Power & Light", "Metro Water Co", "Gas Utility Inc", "ISP Broadband"],
-        "Entertainment": ["AMC Theatres", "Spotify", "Steam", "Netflix", "Local Arcade"],
-        "Dining": ["Chipotle", "Olive Garden", "Local Diner", "Sushi House", "Pizza Place"],
-        "Transport": ["Uber", "Lyft", "Metro Transit", "Shell Gas Station", "Parking Garage"],
-        "Healthcare": ["CVS Pharmacy", "Walgreens", "City Clinic", "Dental Care Co"],
-        "Shopping": ["Amazon", "Target", "Best Buy", "Local Boutique", "IKEA"],
-        "Subscriptions": ["Adobe Creative Cloud", "Notion", "GitHub", "Gym Membership"],
+        "Groceries": [
+            "Whole Foods", "Trader Joe's", "Safeway", "Kroger", "Local Mart",
+            # Indian merchants
+            "FreshMart", "Reliance Fresh", "BigBasket", "More Supermarket", "DMart",
+        ],
+        "Utilities": [
+            "City Power & Light", "Metro Water Co", "Gas Utility Inc", "ISP Broadband",
+            # Indian merchants
+            "Electricity Board", "Airtel", "Jio", "BESCOM", "TANGEDCO",
+        ],
+        "Entertainment": [
+            "AMC Theatres", "Spotify", "Steam", "Netflix", "Local Arcade",
+            # Indian merchants
+            "Hotstar", "BookMyShow",
+        ],
+        "Dining": [
+            "Chipotle", "Olive Garden", "Local Diner", "Sushi House", "Pizza Place",
+            # Indian merchants
+            "Zomato", "Swiggy", "Domino's", "Pizza Hut", "Starbucks India",
+        ],
+        "Transport": [
+            "Uber", "Lyft", "Metro Transit", "Shell Gas Station", "Parking Garage",
+            # Indian merchants
+            "Ola", "Chennai Metro", "Rapido", "Indian Railways",
+        ],
+        "Healthcare": [
+            "CVS Pharmacy", "Walgreens", "City Clinic", "Dental Care Co",
+            # Indian merchants
+            "Apollo Pharmacy", "PharmEasy", "1mg", "Apollo Hospitals",
+        ],
+        "Shopping": [
+            "Amazon", "Target", "Best Buy", "Local Boutique", "IKEA",
+            # Indian merchants
+            "Myntra", "Flipkart", "Ajio", "Croma",
+        ],
+        "Subscriptions": [
+            "Adobe Creative Cloud", "Notion", "GitHub", "Gym Membership",
+            # Indian merchants
+            "Amazon Prime", "YouTube Premium", "Spotify Premium",
+        ],
     }
 
     def generate(

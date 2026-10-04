@@ -234,6 +234,10 @@ class FinancialAgent:
         )
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
+            # openai/gpt-oss-20b is a reasoning model; Groq requires
+            # reasoning_format="hidden" (or "parsed") when json_object mode
+            # is active, otherwise it returns HTTP 400 json_validate_failed.
+            kwargs["reasoning_format"] = "hidden"
         resp = self._client.chat.completions.create(**kwargs)
         return resp.choices[0].message.content or ""
 
@@ -247,7 +251,7 @@ class FinancialAgent:
             history_context=history_context,
             question=question,
         )
-        raw = self._call_llm(prompt, max_tokens=150, json_mode=True).strip()
+        raw = self._call_llm(prompt, max_tokens=1024, json_mode=True).strip()
         logger.info("[dispatch] raw LLM reply: %r", raw)
 
         # Extract the first JSON object from the response
@@ -300,7 +304,7 @@ class FinancialAgent:
             tool_name=tool_name,
             tool_result=tool_result,
         )
-        return self._call_llm(prompt, max_tokens=256).strip()
+        return self._call_llm(prompt, max_tokens=512).strip()
 
     # ------------------------------------------------------------------
     # Public API

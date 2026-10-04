@@ -51,6 +51,17 @@ def main() -> None:
 
     client: APIClient = st.session_state.api_client
 
+    # Consume any pending programmatic navigation request BEFORE the radio
+    # widget is instantiated.  navigate_to() (in frontend.utils) stores the
+    # destination under "_pending_page" and calls st.rerun().  On the next
+    # run we arrive here, pre-seed "nav_radio" with the target page (safe
+    # because the widget does not yet exist in this run), then clear the
+    # pending key so it is not consumed again.
+    from frontend.utils import _PENDING_NAV_KEY
+    pending = st.session_state.pop(_PENDING_NAV_KEY, None)
+    if pending is not None and pending in _PAGE_NAMES:
+        st.session_state["nav_radio"] = pending
+
     with st.sidebar:
         st.title("💰 FinSight AI")
         st.caption("Personal Finance Intelligence")

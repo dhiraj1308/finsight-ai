@@ -34,7 +34,9 @@ TOOL_DESCRIPTIONS = """\
    Spending totals for a time window.
    period values: today, yesterday, this_week, last_week,
                   this_month, last_month, this_year, last_year
-   Use for: "last month spending", "this week total", "spending today"
+   Use for: "last month spending", "this week total", "spending today",
+             "what did I spend most on last month", "highest spending last month",
+             "top spending category last month", "biggest expense this month"
 
 4. retrieve_transactions(query)
    Semantic search for specific transactions by merchant/context.

@@ -561,11 +561,18 @@ def test_synthesize_call_does_not_use_json_mode():
         "Dispatch call must pass response_format for json_mode"
     )
     assert dispatch_kwargs["response_format"] == {"type": "json_object"}
+    # reasoning_format must also be set for the reasoning model
+    assert dispatch_kwargs.get("reasoning_format") == "hidden", (
+        "Dispatch call must pass reasoning_format='hidden' for openai/gpt-oss-20b"
+    )
 
-    # Second call (synthesis) must NOT carry response_format
+    # Second call (synthesis) must NOT carry response_format or reasoning_format
     synthesis_kwargs = calls[1][1]
     assert "response_format" not in synthesis_kwargs, (
         "Synthesis call must NOT pass response_format — it returns prose"
+    )
+    assert "reasoning_format" not in synthesis_kwargs, (
+        "Synthesis call must NOT pass reasoning_format — it returns prose"
     )
 
 
