@@ -6,15 +6,32 @@ from agent.agent import FinancialAgent, OUT_OF_SCOPE_RESPONSE
 
 
 def _make_agent():
+    """Build a FinancialAgent with the Groq client fully mocked out."""
     store = MagicMock()
     vector_store = MagicMock()
     forecaster = MagicMock()
     anomaly_detector = MagicMock()
 
     with patch.dict("os.environ", {"LLM_API_KEY": "test_key"}):
-        with patch("agent.agent.ChatGroq"):
+        with patch("agent.agent.Groq"):
             agent = FinancialAgent(store, vector_store, forecaster, anomaly_detector)
     return agent
+
+
+def _stub_llm(agent, dispatch_reply: str, answer_reply: str = "Answer text."):
+    """Configure agent._client to return controlled LLM responses.
+
+    The agent calls the LLM twice for finance questions:
+      1. dispatch call  → returns dispatch_reply (JSON tool selection)
+      2. synthesise / direct-answer call → returns answer_reply
+    """
+    completion = MagicMock()
+    completion.choices[0].message.content = dispatch_reply
+    answer_completion = MagicMock()
+    answer_completion.choices[0].message.content = answer_reply
+    agent._client.chat.completions.create.side_effect = [
+        completion, answer_completion
+    ]
 
 
 def test_out_of_scope_question_returns_canned_response():
@@ -25,11 +42,10 @@ def test_out_of_scope_question_returns_canned_response():
 
 def test_finance_question_is_not_blocked_by_scope_guard():
     agent = _make_agent()
-    agent._executor = MagicMock()
-    agent._executor.invoke.return_value = {
-        "output": "Total spending: $100.00",
-        "intermediate_steps": [],
-    }
+    # Stub the LLM: dispatch returns "no tool", second call returns a direct answer
+    _stub_llm(agent,
+              dispatch_reply='{"tool": "none", "args": {}}',
+              answer_reply="You spent $100.00 on groceries.")
     result = agent.chat("How much did I spend on groceries?", session_id="s2")
     assert result != OUT_OF_SCOPE_RESPONSE
     assert "100.00" in result
@@ -37,11 +53,9 @@ def test_finance_question_is_not_blocked_by_scope_guard():
 
 def test_session_history_tracks_question_answer_pairs():
     agent = _make_agent()
-    agent._executor = MagicMock()
-    agent._executor.invoke.return_value = {
-        "output": "Total spending: $50.00",
-        "intermediate_steps": [],
-    }
+    _stub_llm(agent,
+              dispatch_reply='{"tool": "none", "args": {}}',
+              answer_reply="You spent $50.00 on dining.")
     agent.chat("How much did I spend on dining?", session_id="s3")
     history = agent.get_history("s3")
     assert len(history) == 1
@@ -51,11 +65,16 @@ def test_session_history_tracks_question_answer_pairs():
 
 def test_session_history_retains_last_five_only():
     agent = _make_agent()
-    agent._executor = MagicMock()
-    agent._executor.invoke.return_value = {
-        "output": "Total: $1.00",
-        "intermediate_steps": [],
-    }
+    # Each chat() needs two LLM calls; build enough stubs for 7 exchanges
+    completions = []
+    for _ in range(7):
+        d = MagicMock()
+        d.choices[0].message.content = '{"tool": "none", "args": {}}'
+        a = MagicMock()
+        a.choices[0].message.content = "Total: $1.00"
+        completions.extend([d, a])
+    agent._client.chat.completions.create.side_effect = completions
+
     for i in range(7):
         agent.chat(f"How much did I spend? Question {i}", session_id="s4")
     history = agent.get_history("s4")
@@ -70,22 +89,608 @@ def test_new_session_starts_with_empty_history():
 
 def test_tool_call_failure_falls_back_to_error_message():
     agent = _make_agent()
-    agent._executor = MagicMock()
-    agent._executor.invoke.side_effect = Exception("Unexpected failure")
+    agent._client.chat.completions.create.side_effect = Exception("Unexpected failure")
     result = agent.chat("How much did I spend on groceries?", session_id="s5")
     assert "error" in result.lower()
 
 
-def test_clean_response_strips_self_correction_preamble():
+def test_finance_question_uses_tool_and_synthesises_answer():
+    """When dispatch picks a real tool, chat() calls it and synthesises an answer."""
     agent = _make_agent()
-    dirty = "I made a mistake. I should not have called the function again. Here is the correct response: Total spending: $42.00"
-    cleaned = agent._clean_response(dirty)
-    assert "I made a mistake" not in cleaned
-    assert "$42.00" in cleaned
+    # Stub the tool registry so the tool call returns something concrete
+    agent._tools["get_spending_summary"] = lambda **kw: "Spending on Groceries: Rs.87.43"
+    _stub_llm(agent,
+              dispatch_reply='{"tool": "get_spending_summary", "args": {"category": "Groceries"}}',
+              answer_reply="You spent Rs.87.43 on Groceries.")
+    result = agent.chat("How much on groceries?", session_id="s6")
+    assert result != OUT_OF_SCOPE_RESPONSE
+    assert "87.43" in result
 
 
-def test_clean_response_leaves_normal_text_unchanged():
+def test_out_of_scope_never_calls_llm():
+    """Non-finance questions must short-circuit before any LLM call."""
     agent = _make_agent()
-    normal = "Total spending for groceries: $87.43 across 5 transaction(s)."
-    cleaned = agent._clean_response(normal)
-    assert cleaned == normal
+    agent.chat("Tell me a joke", session_id="s7")
+    agent._client.chat.completions.create.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Conversation-history tests
+# Verifies that prior turns are stored, bounded, isolated per session,
+# and actually supplied to the LLM on subsequent requests.
+# ---------------------------------------------------------------------------
+
+from agent.agent import _HISTORY_TURNS
+
+
+def _stub_llm_sequence(agent, *reply_pairs):
+    """Configure agent._client to return a sequence of (dispatch, answer) pairs.
+
+    Each element of reply_pairs is a (dispatch_reply, answer_reply) tuple.
+    """
+    completions = []
+    for dispatch_reply, answer_reply in reply_pairs:
+        d = MagicMock()
+        d.choices[0].message.content = dispatch_reply
+        a = MagicMock()
+        a.choices[0].message.content = answer_reply
+        completions.extend([d, a])
+    agent._client.chat.completions.create.side_effect = completions
+
+
+# TEST 1 — history is stored after each exchange
+def test_history_stored_after_multiple_messages():
+    """Each (user, assistant) pair is appended to the session history."""
+    agent = _make_agent()
+    _stub_llm_sequence(
+        agent,
+        ('{"tool": "none", "args": {}}', "You spent Rs.2450 on Dining."),
+        ('{"tool": "none", "args": {}}', "You spent Rs.3200 on Groceries."),
+    )
+    agent.chat("How much on dining?", session_id="hist-1")
+    agent.chat("How much on groceries?", session_id="hist-1")
+
+    stored = agent._session_history["hist-1"]
+    assert len(stored) == 2
+    assert stored[0][0] == "How much on dining?"
+    assert "2450" in stored[0][1]
+    assert stored[1][0] == "How much on groceries?"
+    assert "3200" in stored[1][1]
+
+
+# TEST 2 — history reaches the LLM on the second request
+def test_history_included_in_llm_prompt_on_second_request():
+    """The dispatch prompt sent for the second question must contain the
+    first exchange from conversation history."""
+    agent = _make_agent()
+    _stub_llm_sequence(
+        agent,
+        ('{"tool": "none", "args": {}}', "You spent Rs.2450 on Dining."),
+        ('{"tool": "none", "args": {}}', "Last month you spent Rs.1800 on Dining."),
+    )
+
+    agent.chat("How much did I spend on dining?", session_id="hist-2")
+    agent.chat("What about last month?", session_id="hist-2")
+
+    # The second dispatch call is the third call overall (d1, a1, d2, a2).
+    all_calls = agent._client.chat.completions.create.call_args_list
+    assert len(all_calls) >= 3, "Expected at least 3 LLM calls by the second message"
+
+    second_dispatch_call = all_calls[2]  # 0=dispatch1, 1=answer1, 2=dispatch2
+    prompt_sent = second_dispatch_call[1]["messages"][0]["content"]
+
+    # Prior user turn must appear in the prompt
+    assert "How much did I spend on dining?" in prompt_sent, (
+        "Previous user message must appear in the dispatch prompt for the follow-up"
+    )
+    # Prior assistant answer must appear in the prompt
+    assert "2450" in prompt_sent, (
+        "Previous assistant answer must appear in the dispatch prompt for the follow-up"
+    )
+
+
+# TEST 3 — session isolation
+def test_session_history_is_isolated_per_session_id():
+    """History from session A must never appear in prompts for session B."""
+    agent = _make_agent()
+    _stub_llm_sequence(
+        agent,
+        # session A first message
+        ('{"tool": "none", "args": {}}', "Session A answer: Rs.5000 on Travel."),
+        # session B first message
+        ('{"tool": "none", "args": {}}', "Session B answer: Rs.100 on Dining."),
+    )
+
+    agent.chat("How much did I spend on travel?", session_id="session-A")
+    agent.chat("How much on dining?", session_id="session-B")
+
+    # session-B has its own empty history at the time of the call
+    # (its first message was sent with no prior context)
+    b_dispatch_call = agent._client.chat.completions.create.call_args_list[2]
+    prompt_for_b = b_dispatch_call[1]["messages"][0]["content"]
+
+    assert "session-A" not in prompt_for_b
+    assert "Travel" not in prompt_for_b, (
+        "Session A content ('Travel') must not appear in session B's prompt"
+    )
+    assert "5000" not in prompt_for_b, (
+        "Session A answer amount must not appear in session B's prompt"
+    )
+
+
+# TEST 4 — bounded history (old turns are discarded)
+def test_history_context_bounded_to_history_turns():
+    """Only the most recent _HISTORY_TURNS pairs are included in the prompt.
+
+    With _HISTORY_TURNS=3 and total_exchanges=5, the context window for the
+    last question must contain rounds 1-3 but NOT round 0 (which has rolled off).
+    """
+    agent = _make_agent()
+
+    # Use finance-keyword questions so the gate doesn't block them.
+    total_exchanges = _HISTORY_TURNS + 2  # e.g. 5
+
+    completions = []
+    for i in range(total_exchanges):
+        d = MagicMock()
+        d.choices[0].message.content = '{"tool": "none", "args": {}}'
+        a = MagicMock()
+        a.choices[0].message.content = f"Total spending round {i}: Rs.{i * 100}."
+        completions.extend([d, a])
+    agent._client.chat.completions.create.side_effect = completions
+
+    for i in range(total_exchanges):
+        agent.chat(f"How much did I spend? Round {i}", session_id="bounded-sess")
+
+    # Each exchange produces 2 LLM calls (dispatch + direct-answer).
+    # Total calls = total_exchanges * 2.  The final dispatch is the
+    # second-to-last call overall: index -2.
+    all_calls = agent._client.chat.completions.create.call_args_list
+    assert len(all_calls) == total_exchanges * 2, (
+        f"Expected {total_exchanges * 2} LLM calls, got {len(all_calls)}"
+    )
+
+    last_dispatch_prompt = all_calls[-2][1]["messages"][0]["content"]
+
+    # Round 0 must have rolled off the context window
+    assert "Round 0" not in last_dispatch_prompt, (
+        f"Oldest exchange (Round 0) must be outside the {_HISTORY_TURNS}-turn window"
+    )
+    # The most recent _HISTORY_TURNS rounds before the last must be present
+    for i in range(1, _HISTORY_TURNS + 1):
+        assert f"Round {i}" in last_dispatch_prompt, (
+            f"Round {i} must appear in the {_HISTORY_TURNS}-turn context window"
+        )
+
+
+# TEST 5 — contextual follow-up (prior exchange available during dispatch)
+def test_follow_up_question_has_prior_context_for_tool_dispatch():
+    """Simulate: Q1='How much on dining?' → Q2='What about last month?'.
+
+    The dispatch prompt for Q2 must contain the Q1 context so the LLM can
+    infer the subject ('dining') from prior conversation.
+    """
+    agent = _make_agent()
+
+    # Stub Q1 tool + synthesis
+    agent._tools["get_spending_summary"] = lambda **kw: "Dining total: Rs.2450"
+    _stub_llm_sequence(
+        agent,
+        (
+            '{"tool": "get_spending_summary", "args": {"category": "Dining"}}',
+            "You spent Rs.2450 on Dining.",
+        ),
+        (
+            '{"tool": "get_spending_by_period", "args": {"period": "last_month"}}',
+            "Last month dining: Rs.1800.",
+        ),
+    )
+
+    agent.chat("How much did I spend on dining?", session_id="ctx-1")
+    agent.chat("What about last month?", session_id="ctx-1")
+
+    all_calls = agent._client.chat.completions.create.call_args_list
+    # Q2 dispatch is call index 2 (Q1-dispatch=0, Q1-answer=1, Q2-dispatch=2)
+    q2_dispatch_prompt = all_calls[2][1]["messages"][0]["content"]
+
+    assert "How much did I spend on dining?" in q2_dispatch_prompt, (
+        "Q1 user message must appear in Q2 dispatch context"
+    )
+    assert "2450" in q2_dispatch_prompt, (
+        "Q1 assistant answer must appear in Q2 dispatch context"
+    )
+
+
+# TEST 6 — first message has no history context (empty context is transparent)
+def test_first_message_has_no_history_in_prompt():
+    """On the very first message of a session the history block must be absent."""
+    agent = _make_agent()
+    _stub_llm(
+        agent,
+        dispatch_reply='{"tool": "none", "args": {}}',
+        answer_reply="No history yet.",
+    )
+
+    agent.chat("How much did I spend on groceries?", session_id="fresh-sess")
+
+    first_dispatch = agent._client.chat.completions.create.call_args_list[0]
+    prompt = first_dispatch[1]["messages"][0]["content"]
+
+    assert "Conversation context" not in prompt, (
+        "No history block should appear in the first message's prompt"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Finance keyword gate — context-aware bypass tests
+# Verifies that:
+#   - Finance keyword in message → allowed (unchanged)
+#   - No keyword + no history    → blocked (unchanged)
+#   - No keyword + financial history → contextual bypass allowed
+#   - No keyword + non-financial history → still blocked
+#   - Session isolation: another session's history never grants bypass
+# ---------------------------------------------------------------------------
+
+from agent.agent import FINANCE_KEYWORDS
+
+
+# TEST 1 — existing finance keyword still works (gate unchanged)
+def test_gate_allows_finance_keyword_question():
+    """A message containing a finance keyword passes the gate as before."""
+    agent = _make_agent()
+    _stub_llm(agent,
+              dispatch_reply='{"tool": "none", "args": {}}',
+              answer_reply="You spent Rs.2450 on dining.")
+    result = agent.chat("How much did I spend on dining?", session_id="gate-1")
+    assert result != OUT_OF_SCOPE_RESPONSE
+
+
+# TEST 2 — clearly unrelated first message is still blocked
+def test_gate_blocks_unrelated_first_message():
+    """A first message with no finance keywords and no history is rejected."""
+    agent = _make_agent()
+    result = agent.chat("What is the capital of France?", session_id="gate-2")
+    assert result == OUT_OF_SCOPE_RESPONSE
+    agent._client.chat.completions.create.assert_not_called()
+
+
+# TEST 3 — contextual follow-up is allowed after a financial first message
+def test_gate_allows_vague_followup_after_financial_history():
+    """'What about that?' has no finance keywords but follows a financial Q&A."""
+    agent = _make_agent()
+    _stub_llm_sequence(
+        agent,
+        ('{"tool": "none", "args": {}}', "You spent Rs.2450 on Dining."),
+        ('{"tool": "none", "args": {}}', "Here are the details."),
+    )
+    agent.chat("How much did I spend on dining?", session_id="gate-3")
+    result = agent.chat("What about that?", session_id="gate-3")
+    assert result != OUT_OF_SCOPE_RESPONSE, (
+        "'What about that?' should not be blocked when session has financial history"
+    )
+
+
+# TEST 4 — contextual period follow-up is allowed
+def test_gate_allows_period_followup_in_financial_session():
+    """'What about the previous month?' after a financial question must pass."""
+    agent = _make_agent()
+    _stub_llm_sequence(
+        agent,
+        ('{"tool": "none", "args": {}}', "You spent Rs.3200 on Groceries this month."),
+        ('{"tool": "none", "args": {}}', "Previous month: Rs.2800 on Groceries."),
+    )
+    agent.chat("How much did I spend on groceries this month?", session_id="gate-4")
+    result = agent.chat("What about the previous month?", session_id="gate-4")
+    assert result != OUT_OF_SCOPE_RESPONSE, (
+        "Period follow-up should not be blocked in a financial session"
+    )
+
+
+# TEST 5 — session isolation: session B cannot inherit session A's context
+def test_gate_session_isolation_no_cross_session_bypass():
+    """Session A has financial history; session B's vague message must still be blocked."""
+    agent = _make_agent()
+    _stub_llm(agent,
+              dispatch_reply='{"tool": "none", "args": {}}',
+              answer_reply="You spent Rs.5000 on Travel.")
+    # Establish financial history only for session A
+    agent.chat("How much did I spend on travel?", session_id="gate-session-A")
+
+    # Session B has NO history of its own — its vague message must be rejected
+    result = agent.chat("What about that?", session_id="gate-session-B")
+    assert result == OUT_OF_SCOPE_RESPONSE, (
+        "Session B must not bypass the gate using session A's financial history"
+    )
+
+
+# TEST 6 — financial history does NOT make arbitrary unrelated questions pass
+def test_gate_blocks_unrelated_question_despite_financial_history():
+    """Even with financial history, clearly unrelated questions must be rejected."""
+    agent = _make_agent()
+    _stub_llm(agent,
+              dispatch_reply='{"tool": "none", "args": {}}',
+              answer_reply="You spent Rs.2450 on Dining.")
+    agent.chat("How much did I spend on dining?", session_id="gate-6")
+
+    # Now ask something completely unrelated
+    call_count_before = agent._client.chat.completions.create.call_count
+    result = agent.chat("What is the capital of France?", session_id="gate-6")
+    assert result == OUT_OF_SCOPE_RESPONSE, (
+        "Clearly unrelated question must still be rejected even after financial history"
+    )
+    # No additional LLM calls for the rejected message
+    assert agent._client.chat.completions.create.call_count == call_count_before
+
+
+# TEST 7 — no history + vague follow-up → still rejected
+def test_gate_blocks_vague_followup_with_no_history():
+    """'What about that?' with no session history must be rejected by the gate."""
+    agent = _make_agent()
+    result = agent.chat("What about that?", session_id="gate-7")
+    assert result == OUT_OF_SCOPE_RESPONSE, (
+        "A vague follow-up with no history must not bypass the finance gate"
+    )
+    agent._client.chat.completions.create.assert_not_called()
+
+
+# TEST 8 — rejected messages are NOT appended to session history
+def test_gate_rejection_does_not_pollute_history():
+    """When the gate rejects a message, it must not be stored in session history."""
+    agent = _make_agent()
+    agent.chat("What is the capital of France?", session_id="gate-8")
+    assert "gate-8" not in agent._session_history, (
+        "Rejected out-of-scope message must not appear in session history"
+    )
+
+
+# ---------------------------------------------------------------------------
+# JSON-mode dispatch tests (Task: fix unquoted-key LLM output)
+#
+# These tests cover the runtime failure where openai/gpt-oss-20b returned
+# JavaScript-style object literals with unquoted keys:
+#   {tool: get_spending_summary, args: {category: "all"}}
+# which caused json.loads() to raise JSONDecodeError, _dispatch() to return
+# ("none", "") and the agent to reply "I could not retrieve relevant data."
+#
+# The fix: _call_llm(..., json_mode=True) is passed for the dispatch step,
+# which forces response_format={"type": "json_object"} on the API call,
+# guaranteeing valid double-quoted JSON in the response.
+# ---------------------------------------------------------------------------
+
+
+def _stub_llm_with_side_effects(agent, side_effects: list):
+    """Set arbitrary side_effect list on the mock LLM client."""
+    completions = []
+    for content in side_effects:
+        m = MagicMock()
+        m.choices[0].message.content = content
+        completions.append(m)
+    agent._client.chat.completions.create.side_effect = completions
+
+
+# ---------------------------------------------------------------------------
+# TEST A — valid JSON-mode output (double-quoted keys) is parsed successfully
+# and the selected tool is invoked.
+# ---------------------------------------------------------------------------
+
+def test_dispatch_parses_valid_json_mode_output_and_calls_tool():
+    """
+    A. Dispatch call returns proper double-quoted JSON (as produced by
+       json_mode=True / response_format={"type":"json_object"}).
+
+    Verifies:
+    - json.loads() succeeds on the response
+    - The named tool is looked up and called with the supplied args
+    - The tool result reaches chat()'s answer synthesis step
+    - The final reply is NOT the canned 'could not retrieve' fallback
+    """
+    agent = _make_agent()
+    agent._tools["get_spending_summary"] = MagicMock(
+        return_value="Total: Rs.210564.00 across 45 transactions."
+    )
+
+    _stub_llm_with_side_effects(agent, [
+        # Dispatch reply — valid JSON as json_mode forces
+        '{"tool": "get_spending_summary", "args": {"category": "all"}}',
+        # Synthesis reply
+        "You spent Rs.210564.00 in total across 45 transactions.",
+    ])
+
+    result = agent.chat("How much did I spend in total?", session_id="jm-a")
+
+    # Tool must have been called
+    agent._tools["get_spending_summary"].assert_called_once_with(category="all")
+    # Answer must contain the tool data, not the canned fallback
+    assert "210564" in result
+    assert "could not retrieve" not in result.lower()
+
+
+# ---------------------------------------------------------------------------
+# TEST B — dispatch actually invokes the selected tool with correct args
+# ---------------------------------------------------------------------------
+
+def test_dispatch_invokes_tool_with_correct_args():
+    """
+    B. When the LLM selects a tool with specific args, _dispatch() calls
+       that exact tool callable with those args unpacked as keyword arguments.
+    """
+    agent = _make_agent()
+    tool_mock = MagicMock(return_value="Dining total: Rs.4500.")
+    agent._tools["get_spending_summary"] = tool_mock
+
+    _stub_llm_with_side_effects(agent, [
+        '{"tool": "get_spending_summary", "args": {"category": "Dining"}}',
+        "You spent Rs.4500 on Dining.",
+    ])
+
+    agent.chat("How much did I spend on dining?", session_id="jm-b")
+
+    tool_mock.assert_called_once_with(category="Dining")
+
+
+# ---------------------------------------------------------------------------
+# TEST C — answer-synthesis LLM call does NOT receive response_format
+# ---------------------------------------------------------------------------
+
+def test_synthesize_call_does_not_use_json_mode():
+    """
+    C. The answer-synthesis (second) LLM call must NOT pass
+       response_format={"type": "json_object"} — it should return prose.
+
+    Verifies that only the dispatch call (first) carries response_format,
+    and the synthesis call (second) carries no response_format key.
+    """
+    agent = _make_agent()
+    agent._tools["get_spending_summary"] = MagicMock(
+        return_value="Total: Rs.1000."
+    )
+
+    _stub_llm_with_side_effects(agent, [
+        '{"tool": "get_spending_summary", "args": {"category": "all"}}',
+        "You spent Rs.1000.",
+    ])
+
+    agent.chat("How much did I spend?", session_id="jm-c")
+
+    calls = agent._client.chat.completions.create.call_args_list
+    assert len(calls) == 2, f"Expected 2 LLM calls, got {len(calls)}"
+
+    # First call (dispatch) must carry response_format
+    dispatch_kwargs = calls[0][1]
+    assert "response_format" in dispatch_kwargs, (
+        "Dispatch call must pass response_format for json_mode"
+    )
+    assert dispatch_kwargs["response_format"] == {"type": "json_object"}
+    # reasoning_format must also be set for the reasoning model
+    assert dispatch_kwargs.get("reasoning_format") == "hidden", (
+        "Dispatch call must pass reasoning_format='hidden' for openai/gpt-oss-20b"
+    )
+
+    # Second call (synthesis) must NOT carry response_format or reasoning_format
+    synthesis_kwargs = calls[1][1]
+    assert "response_format" not in synthesis_kwargs, (
+        "Synthesis call must NOT pass response_format — it returns prose"
+    )
+    assert "reasoning_format" not in synthesis_kwargs, (
+        "Synthesis call must NOT pass reasoning_format — it returns prose"
+    )
+
+
+# ---------------------------------------------------------------------------
+# TEST D — existing malformed/invalid tool handling still works
+# ---------------------------------------------------------------------------
+
+def test_dispatch_handles_unknown_tool_name_gracefully():
+    """
+    D-1. When the LLM returns valid JSON but names a tool not in the registry,
+         _dispatch() returns ("none", "") and the agent answers directly
+         without crashing.
+    """
+    agent = _make_agent()
+
+    _stub_llm_with_side_effects(agent, [
+        '{"tool": "nonexistent_tool", "args": {}}',
+        "I couldn't find relevant data.",
+    ])
+
+    # Must not raise
+    result = agent.chat("How much did I spend?", session_id="jm-d1")
+    assert isinstance(result, str)
+    assert len(result) > 0
+
+
+def test_dispatch_handles_tool_none_gracefully():
+    """
+    D-2. When the LLM returns {"tool": "none", ...}, _dispatch() returns
+         ("none", "") and the agent falls through to a direct LLM answer.
+    """
+    agent = _make_agent()
+
+    _stub_llm_with_side_effects(agent, [
+        '{"tool": "none", "args": {}}',
+        "I don't have enough information to answer that.",
+    ])
+
+    result = agent.chat("How much did I spend?", session_id="jm-d2")
+    assert isinstance(result, str)
+    assert "could not retrieve" not in result.lower()
+
+
+def test_dispatch_handles_json_missing_tool_key_gracefully():
+    """
+    D-3. Valid JSON but missing the 'tool' key → defaults to "none", no crash.
+    """
+    agent = _make_agent()
+
+    _stub_llm_with_side_effects(agent, [
+        '{"args": {}}',   # no "tool" key
+        "Direct answer.",
+    ])
+
+    result = agent.chat("How much did I spend?", session_id="jm-d3")
+    assert isinstance(result, str)
+
+
+def test_dispatch_handles_empty_llm_response_gracefully():
+    """
+    D-4. When _call_llm returns an empty string (edge case), _dispatch()
+         returns ("none", "") without crashing.
+    """
+    agent = _make_agent()
+
+    _stub_llm_with_side_effects(agent, [
+        "",              # empty dispatch response
+        "Direct answer.",
+    ])
+
+    result = agent.chat("How much did I spend?", session_id="jm-d4")
+    assert isinstance(result, str)
+
+
+# ---------------------------------------------------------------------------
+# TEST E — real-style financial question dispatches to the right tool
+#          and does NOT produce the canned fallback response
+# ---------------------------------------------------------------------------
+
+def test_real_financial_question_dispatches_to_spending_summary():
+    """
+    E. End-to-end: "How much did I spend in total?" →
+       - finance gate: passes (contains 'spend')
+       - dispatch LLM call: returns valid JSON selecting get_spending_summary
+       - tool called: returns real-looking data
+       - synthesis: returns an answer containing the data
+       - final reply: contains the spending figure, NOT the canned fallback
+
+    This directly validates the fix for the production bug where the LLM's
+    unquoted-key output caused all chat responses to fall through to
+    "I could not retrieve relevant data. Please try rephrasing."
+    """
+    agent = _make_agent()
+    agent._tools["get_spending_summary"] = MagicMock(
+        return_value=(
+            "Total: Rs.210564.00 across 45 transactions. By category:\n"
+            "  Other: Rs.210564.00 (45 txns)"
+        )
+    )
+
+    _stub_llm_with_side_effects(agent, [
+        # This is what json_mode now guarantees — valid double-quoted JSON
+        '{"tool": "get_spending_summary", "args": {"category": "all"}}',
+        "You have spent Rs.210,564.00 in total across 45 transactions.",
+    ])
+
+    result = agent.chat("How much did I spend in total?", session_id="jm-e")
+
+    # The tool must have been dispatched
+    agent._tools["get_spending_summary"].assert_called_once()
+
+    # The answer must contain the actual data
+    assert "210" in result, f"Expected spending figure in answer, got: {result!r}"
+
+    # The canned fallback must NOT appear
+    assert result != "I could not retrieve relevant data. Please try rephrasing.", (
+        "chat() must not fall through to the canned fallback when dispatch succeeds"
+    )
+    assert "could not retrieve" not in result.lower(), (
+        f"Unexpected fallback response: {result!r}"
+    )

@@ -30,6 +30,8 @@ class Settings:
     PROPHET_YEARLY_SEASONALITY: bool
     PROPHET_WEEKLY_SEASONALITY: bool
     LOG_LEVEL: str
+    CATEGORIZER_MODEL_PATH: str
+    CSV_UPLOAD_DIR: str
 
     REQUIRED_VARS = [
         "SQLITE_DB_PATH",
@@ -66,6 +68,10 @@ class Settings:
             os.getenv("PROPHET_WEEKLY_SEASONALITY", "true").lower() == "true"
         )
         self.LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+        self.CATEGORIZER_MODEL_PATH = os.getenv(
+            "CATEGORIZER_MODEL_PATH", "data/processed/categorizer.joblib"
+        )
+        self.CSV_UPLOAD_DIR = os.getenv("CSV_UPLOAD_DIR", "data/raw")
 
     def configure_logging(self) -> None:
         """Configure Python logging based on LOG_LEVEL setting."""

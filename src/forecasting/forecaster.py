@@ -16,6 +16,15 @@ MIN_HISTORY_DAYS = 14
 MIN_HORIZON_DAYS = 1
 MAX_HORIZON_DAYS = 365
 
+# ---------------------------------------------------------------------------
+# Income-keyword filter — mirrors frontend.views.dashboard._INCOME_KEYWORDS.
+# Transactions whose merchant name contains any of these words (case-insensitive)
+# are treated as income/credit and excluded from expense-level forecasting.
+# ---------------------------------------------------------------------------
+_INCOME_KEYWORDS: frozenset[str] = frozenset({
+    "salary", "credit", "income", "refund", "cashback",
+})
+
 
 @dataclass
 class ForecastPoint:
@@ -181,3 +190,84 @@ class Forecaster:
                 results[category] = str(e)
 
         return results
+
+    def forecast_aggregate(
+        self,
+        horizon_days: int,
+        store: TransactionStore,
+    ) -> Forecast:
+        """Forecast total expense spending across all categories.
+
+        Aggregates ALL non-income transactions by calendar date, then runs
+        the same EWMA + linear trend algorithm used by ``forecast_category``.
+        Income is identified by the ``_INCOME_KEYWORDS`` merchant-name heuristic.
+
+        Returns a :class:`Forecast` with ``category="Total Expenses"``.
+
+        Raises
+        ------
+        ValueError
+            If horizon_days is out of range, no expense transactions exist,
+            or fewer than ``MIN_HISTORY_DAYS`` distinct expense days are found.
+        """
+        if not (MIN_HORIZON_DAYS <= horizon_days <= MAX_HORIZON_DAYS):
+            raise ValueError(
+                f"horizon_days must be between {MIN_HORIZON_DAYS} and "
+                f"{MAX_HORIZON_DAYS}, got {horizon_days}."
+            )
+
+        all_txns = store.get_all()
+        expense_txns = [
+            t for t in all_txns
+            if not any(kw in t.merchant.lower() for kw in _INCOME_KEYWORDS)
+        ]
+
+        if not expense_txns:
+            raise ValueError(
+                "No expense transactions found. "
+                "Upload a bank statement to enable forecasting."
+            )
+
+        # Aggregate by calendar date
+        daily: dict[date, float] = {}
+        for txn in expense_txns:
+            daily[txn.date] = daily.get(txn.date, 0.0) + txn.amount
+
+        df = pd.DataFrame(
+            [{"ds": d, "y": total} for d, total in daily.items()]
+        ).sort_values("ds").reset_index(drop=True)
+
+        if len(df) < MIN_HISTORY_DAYS:
+            raise ValueError(
+                f"Only {len(df)} distinct calendar days of expense history found. "
+                f"At least {MIN_HISTORY_DAYS} are required."
+            )
+
+        y = df["y"].values.astype(float)
+        point_estimates, std = self._ewma_with_trend(y, horizon_days)
+
+        z95 = 1.96
+        margin = z95 * std
+
+        last_date = df["ds"].iloc[-1]
+        if hasattr(last_date, "date"):
+            last_date = last_date.date()
+
+        points = []
+        for i in range(horizon_days):
+            forecast_date = last_date + timedelta(days=i + 1)
+            yhat = float(point_estimates[i])
+            points.append(
+                ForecastPoint(
+                    date=forecast_date,
+                    yhat=yhat,
+                    yhat_lower=max(0.0, yhat - margin),
+                    yhat_upper=yhat + margin,
+                )
+            )
+
+        return Forecast(
+            category="Total Expenses",
+            horizon_days=horizon_days,
+            points=points,
+        )

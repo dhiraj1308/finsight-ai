@@ -150,3 +150,59 @@ def test_delete_removes_transaction(tmp_path):
     store.delete(txn_id)
 
     assert store.get_all() == []
+
+
+# ---------------------------------------------------------------------------
+# update_anomaly_scores — new public method tests
+# ---------------------------------------------------------------------------
+
+def test_update_anomaly_scores_sets_flags_correctly(tmp_path):
+    """update_anomaly_scores writes is_anomaly and anomaly_score to the DB."""
+    store = _make_store(tmp_path)
+    store.insert([
+        _sample_transaction(merchant="Store A"),
+        _sample_transaction(merchant="Store B"),
+    ])
+    txns = store.get_all()
+    id_a = next(t.id for t in txns if t.merchant == "Store A")
+    id_b = next(t.id for t in txns if t.merchant == "Store B")
+
+    store.update_anomaly_scores([
+        (id_a, True, 0.87),
+        (id_b, False, 0.12),
+    ])
+
+    updated = {t.merchant: t for t in store.get_all()}
+    assert updated["Store A"].is_anomaly is True
+    assert abs(updated["Store A"].anomaly_score - 0.87) < 1e-6
+    assert updated["Store B"].is_anomaly is False
+    assert abs(updated["Store B"].anomaly_score - 0.12) < 1e-6
+
+
+def test_update_anomaly_scores_handles_empty_list(tmp_path):
+    """An empty updates list must not raise and must not alter any row."""
+    store = _make_store(tmp_path)
+    store.insert([_sample_transaction()])
+    before = store.get_all()[0]
+
+    store.update_anomaly_scores([])   # must be a no-op
+
+    after = store.get_all()[0]
+    assert after.is_anomaly == before.is_anomaly
+    assert after.anomaly_score == before.anomaly_score
+
+
+def test_update_anomaly_scores_multiple_transactions(tmp_path):
+    """All rows in the update list are written in a single call."""
+    store = _make_store(tmp_path)
+    merchants = [f"Merchant {i}" for i in range(5)]
+    store.insert([_sample_transaction(merchant=m) for m in merchants])
+
+    txns = store.get_all()
+    updates = [(t.id, i % 2 == 0, float(i) * 0.1) for i, t in enumerate(txns)]
+    store.update_anomaly_scores(updates)
+
+    refreshed = {t.id: t for t in store.get_all()}
+    for txn_id, expected_flag, expected_score in updates:
+        assert refreshed[txn_id].is_anomaly is expected_flag
+        assert abs(refreshed[txn_id].anomaly_score - expected_score) < 1e-6
