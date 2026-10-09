@@ -43,8 +43,13 @@ def _store_with_transactions(tmp_path, txns: list[Transaction]) -> TransactionSt
     return store
 
 
-def _expense_txns(n: int = MIN_HISTORY_DAYS + 2, start: date = date(2026, 1, 1)) -> list[Transaction]:
-    """Return n expense transactions on distinct consecutive days."""
+def _expense_txns(n: int = MIN_HISTORY_DAYS + 2, start: date = date(2026, 1, 20)) -> list[Transaction]:
+    """Return n expense transactions on distinct consecutive days.
+
+    Default start date (2026-01-20) is chosen so that the default n=16 rows
+    span Jan 20 – Feb 4 — covering exactly 2 distinct calendar months, which
+    satisfies both the 14-day and the 2-month guards in forecast_aggregate().
+    """
     from datetime import timedelta
     return [
         Transaction(
@@ -240,3 +245,158 @@ class TestOutputStructure:
             assert forecast.points[i].date == expected, (
                 f"Gap between point {i-1} and {i}"
             )
+
+
+# ---------------------------------------------------------------------------
+# TEST 5 — 2-month minimum history rule
+# ---------------------------------------------------------------------------
+
+from forecasting.forecaster import MIN_HISTORY_MONTHS
+
+
+class TestTwoMonthRule:
+    """Verify the 2-distinct-calendar-month requirement in forecast_aggregate().
+
+    The check fires AFTER the 14-day guard, so datasets with fewer than
+    MIN_HISTORY_DAYS days still fail the 14-day test first.
+    """
+
+    def test_raises_when_only_one_month(self, tmp_path):
+        """14+ expense days in a single calendar month must be rejected."""
+        # 20 consecutive days all within January 2026
+        txns = [
+            Transaction(
+                date=date(2026, 1, i + 1),
+                merchant="Swiggy",
+                amount=500.0,
+                category="Dining",
+                source_file="test.csv",
+            )
+            for i in range(20)   # 20 > MIN_HISTORY_DAYS=14, but only 1 month
+        ]
+        store = _store_with_transactions(tmp_path, txns)
+        f = Forecaster()
+        with pytest.raises(ValueError) as exc_info:
+            f.forecast_aggregate(30, store)
+        err = str(exc_info.value)
+        assert "month" in err.lower(), f"Expected 'month' in error: {err!r}"
+
+    def test_raises_when_only_one_month_100_transactions(self, tmp_path):
+        """100 transactions in a single month still fails — count is irrelevant."""
+        from datetime import timedelta
+        txns = [
+            Transaction(
+                date=date(2026, 1, 1) + timedelta(days=i % 28),
+                merchant="Zomato",
+                amount=300.0,
+                category="Dining",
+                source_file="test.csv",
+            )
+            for i in range(100)
+        ]
+        store = _store_with_transactions(tmp_path, txns)
+        f = Forecaster()
+        with pytest.raises(ValueError) as exc_info:
+            f.forecast_aggregate(30, store)
+        assert "month" in str(exc_info.value).lower()
+
+    def test_passes_with_exactly_two_months(self, tmp_path):
+        """14+ expense days spanning exactly 2 distinct months must succeed."""
+        # 16 days: Jan 20 – Feb 4 → 2 months, 16 days (both guards pass)
+        from datetime import timedelta
+        txns = [
+            Transaction(
+                date=date(2026, 1, 20) + timedelta(days=i),
+                merchant="FreshMart",
+                amount=1200.0,
+                category="Groceries",
+                source_file="test.csv",
+            )
+            for i in range(16)
+        ]
+        store = _store_with_transactions(tmp_path, txns)
+        f = Forecaster()
+        forecast = f.forecast_aggregate(30, store)
+        assert forecast.category == "Total Expenses"
+        assert len(forecast.points) == 30
+
+    def test_14_day_guard_fires_before_month_guard(self, tmp_path):
+        """3 days across 2 months → 14-day guard fires, not month guard."""
+        txns = [
+            Transaction(date=date(2026, 1, 31), merchant="Swiggy",
+                        amount=500.0, category="Dining", source_file="test"),
+            Transaction(date=date(2026, 2, 1),  merchant="Swiggy",
+                        amount=500.0, category="Dining", source_file="test"),
+            Transaction(date=date(2026, 2, 2),  merchant="Swiggy",
+                        amount=500.0, category="Dining", source_file="test"),
+        ]
+        store = _store_with_transactions(tmp_path, txns)
+        f = Forecaster()
+        with pytest.raises(ValueError) as exc_info:
+            f.forecast_aggregate(30, store)
+        err = str(exc_info.value)
+        # The 14-day guard must fire (3 < 14), not the month guard
+        assert str(MIN_HISTORY_DAYS) in err, (
+            f"Expected 14-day guard message, got: {err!r}"
+        )
+        assert "month" not in err.lower(), (
+            f"Month guard must not fire when day guard catches it first: {err!r}"
+        )
+
+    def test_income_does_not_count_toward_months(self, tmp_path):
+        """Income in month 2 must not satisfy the 2-month requirement."""
+        # Jan expenses only (1 month), plus income rows in February
+        jan_expense = [
+            Transaction(
+                date=date(2026, 1, i + 1),
+                merchant="Amazon",
+                amount=1000.0,
+                category="Shopping",
+                source_file="test.csv",
+            )
+            for i in range(20)  # 20 Jan expense days
+        ]
+        feb_income = [
+            Transaction(
+                date=date(2026, 2, i + 1),
+                merchant="Salary Credit",
+                amount=65000.0,
+                category="Other",
+                source_file="test.csv",
+            )
+            for i in range(5)
+        ]
+        store = _store_with_transactions(tmp_path, jan_expense + feb_income)
+        f = Forecaster()
+        with pytest.raises(ValueError) as exc_info:
+            f.forecast_aggregate(30, store)
+        err = str(exc_info.value)
+        assert "month" in err.lower(), (
+            f"Income in Feb must not count as a second expense month: {err!r}"
+        )
+
+    def test_error_message_contains_month_count(self, tmp_path):
+        """The ValueError message must state the actual number of months found."""
+        txns = [
+            Transaction(
+                date=date(2026, 3, i + 1),
+                merchant="Netflix",
+                amount=649.0,
+                category="Entertainment",
+                source_file="test.csv",
+            )
+            for i in range(20)
+        ]
+        store = _store_with_transactions(tmp_path, txns)
+        f = Forecaster()
+        with pytest.raises(ValueError) as exc_info:
+            f.forecast_aggregate(30, store)
+        err = str(exc_info.value)
+        assert "1" in err, f"Error must mention '1' month found: {err!r}"
+        assert str(MIN_HISTORY_MONTHS) in err, (
+            f"Error must mention the required {MIN_HISTORY_MONTHS} months: {err!r}"
+        )
+
+    def test_min_history_months_constant_is_two(self):
+        """Sanity check: MIN_HISTORY_MONTHS == 2."""
+        assert MIN_HISTORY_MONTHS == 2

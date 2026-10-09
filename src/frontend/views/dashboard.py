@@ -341,11 +341,18 @@ def _next_month_forecast(
         except RuntimeError as exc:
             err = str(exc)
             if "422" in err:
-                st.info(
-                    "Not enough historical data to forecast yet. "
-                    "At least 14 days of expense transactions are needed. "
-                    "Upload more statements to enable forecasting."
-                )
+                if "month" in err.lower():
+                    st.info(
+                        "📅 **Forecast unavailable** — upload at least 2 months of "
+                        "transaction history to generate a spending forecast. "
+                        "Spending analysis and financial insights remain available above."
+                    )
+                else:
+                    st.info(
+                        "Not enough historical data to forecast yet. "
+                        "At least 14 days of expense transactions are needed. "
+                        "Upload more statements to enable forecasting."
+                    )
             else:
                 st.error(f"Could not load forecast: {err}")
             return

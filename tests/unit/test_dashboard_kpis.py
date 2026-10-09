@@ -818,3 +818,78 @@ class TestFinancialInsightsRendering:
         mock_st = self._call_render(txns, anomalies)
         # Must not have raised — info must NOT be called (there is expense data)
         mock_st.info.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TEST GROUP 10 — _next_month_forecast() 2-month message branching
+# ---------------------------------------------------------------------------
+
+class TestNextMonthForecastMessageBranching:
+    """Verify the dashboard shows the correct message depending on which
+    backend guard fired (2-month rule vs 14-day rule)."""
+
+    def _make_client_raising(self, error_message: str):
+        """Return a mock API client whose get_forecast_aggregate raises RuntimeError."""
+        client = MagicMock()
+        client.get_forecast_aggregate.side_effect = RuntimeError(error_message)
+        return client
+
+    def _call_forecast(self, client):
+        for dep in list(sys.modules):
+            if dep.startswith("frontend."):
+                del sys.modules[dep]
+        sys.modules.setdefault("frontend.services.api", MagicMock())
+        sys.modules.setdefault("frontend.utils", MagicMock())
+        mock_st = _make_mock_st()
+        mock_st.spinner.return_value.__enter__ = MagicMock(return_value=None)
+        mock_st.spinner.return_value.__exit__ = MagicMock(return_value=False)
+        with patch.dict(sys.modules, {"streamlit": mock_st}):
+            import frontend.views.dashboard as dash_mod
+        dash_mod.st = mock_st
+        dash_mod._next_month_forecast(client)
+        return mock_st
+
+    def test_month_error_shows_2month_upgrade_message(self):
+        """A 422 error mentioning 'month' must show the 2-month upgrade message."""
+        client = self._make_client_raising(
+            "Backend returned 422: Expense history spans only 1 calendar month(s). "
+            "At least 2 months are required for forecasting."
+        )
+        mock_st = self._call_forecast(client)
+        mock_st.info.assert_called_once()
+        # The info message must mention '2 months'
+        info_text = mock_st.info.call_args[0][0]
+        assert "2 months" in info_text.lower() or "two month" in info_text.lower(), (
+            f"Expected 2-month message, got: {info_text!r}"
+        )
+
+    def test_day_error_shows_14day_message(self):
+        """A 422 error mentioning days (not months) must show the 14-day message."""
+        client = self._make_client_raising(
+            "Backend returned 422: Only 10 distinct calendar days of expense "
+            "history found. At least 14 are required."
+        )
+        mock_st = self._call_forecast(client)
+        mock_st.info.assert_called_once()
+        info_text = mock_st.info.call_args[0][0]
+        assert "14 days" in info_text.lower() or "14" in info_text, (
+            f"Expected 14-day message, got: {info_text!r}"
+        )
+
+    def test_month_error_does_not_show_st_error(self):
+        """A 422 month error must use st.info, not st.error."""
+        client = self._make_client_raising(
+            "Backend returned 422: Expense history spans only 1 calendar month(s)."
+        )
+        mock_st = self._call_forecast(client)
+        mock_st.error.assert_not_called()
+        mock_st.info.assert_called_once()
+
+    def test_non_422_error_still_shows_st_error(self):
+        """A non-422 RuntimeError must still show st.error (unchanged behavior)."""
+        client = self._make_client_raising(
+            "Backend returned 500: internal server error"
+        )
+        mock_st = self._call_forecast(client)
+        mock_st.error.assert_called_once()
+        mock_st.info.assert_not_called()

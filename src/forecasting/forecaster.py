@@ -13,6 +13,7 @@ from ingestion.transaction_store import TransactionStore
 logger = logging.getLogger(__name__)
 
 MIN_HISTORY_DAYS = 14
+MIN_HISTORY_MONTHS = 2
 MIN_HORIZON_DAYS = 1
 MAX_HORIZON_DAYS = 365
 
@@ -241,6 +242,14 @@ class Forecaster:
             raise ValueError(
                 f"Only {len(df)} distinct calendar days of expense history found. "
                 f"At least {MIN_HISTORY_DAYS} are required."
+            )
+
+        distinct_months = len({(d.year, d.month) for d in df["ds"]})
+        if distinct_months < MIN_HISTORY_MONTHS:
+            raise ValueError(
+                f"Expense history spans only {distinct_months} calendar month(s). "
+                f"At least {MIN_HISTORY_MONTHS} months are required for forecasting. "
+                "Upload statements from at least 2 different months."
             )
 
         y = df["y"].values.astype(float)

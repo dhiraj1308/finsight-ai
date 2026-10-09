@@ -81,14 +81,18 @@ def _untrained_categorizer():
 
 
 def _store_with_expenses(tmp_path: Path, n_days: int = MIN_HISTORY_DAYS + 5) -> object:
-    """Create a TransactionStore with n_days distinct expense days."""
+    """Create a TransactionStore with n_days distinct expense days.
+
+    Default start date (Jan 20) ensures the default 19-day range spans
+    Jan 20 – Feb 7, covering 2 calendar months (satisfying the 2-month rule).
+    """
     from ingestion.transaction_store import TransactionStore
     from domain import Transaction
 
     store = TransactionStore(str(tmp_path / "agg_test.db"))
     for i in range(n_days):
         store.insert([Transaction(
-            date=date(2026, 1, 1) + timedelta(days=i),
+            date=date(2026, 1, 20) + timedelta(days=i),
             merchant="Swiggy",
             amount=500.0 + i,
             category="Dining",
@@ -98,12 +102,16 @@ def _store_with_expenses(tmp_path: Path, n_days: int = MIN_HISTORY_DAYS + 5) -> 
 
 
 def _store_with_mixed(tmp_path: Path) -> object:
-    """Store with both income and expense rows; only expenses count toward history."""
+    """Store with both income and expense rows; only expenses count toward history.
+
+    Expenses span Feb 1 – Feb (MIN_HISTORY_DAYS+3) in year 2026 and
+    Jan 20–31 in 2026 — two distinct months — so both guards pass.
+    """
     from ingestion.transaction_store import TransactionStore
     from domain import Transaction
 
     store = TransactionStore(str(tmp_path / "mixed.db"))
-    # Income rows (must be excluded)
+    # Income rows in January (must be excluded from expense month count)
     for i in range(5):
         store.insert([Transaction(
             date=date(2026, 1, i + 1),
@@ -112,10 +120,10 @@ def _store_with_mixed(tmp_path: Path) -> object:
             category="Other",
             source_file="test.csv",
         )])
-    # Expense rows (MIN_HISTORY_DAYS + 2 distinct days)
+    # Expense rows spanning Jan 20 – Feb (MIN_HISTORY_DAYS+3) → 2 months
     for i in range(MIN_HISTORY_DAYS + 2):
         store.insert([Transaction(
-            date=date(2026, 2, 1) + timedelta(days=i),
+            date=date(2026, 1, 20) + timedelta(days=i),
             merchant="FreshMart",
             amount=1200.0 + i,
             category="Groceries",
@@ -136,6 +144,46 @@ def _store_too_few_days(tmp_path: Path) -> object:
             merchant="Zomato",
             amount=300.0,
             category="Dining",
+            source_file="test.csv",
+        )])
+    return store
+
+
+def _store_one_month_only(tmp_path: Path) -> object:
+    """Store with 20 expense days all in one calendar month (January 2026).
+
+    Passes the 14-day guard (20 >= 14) but fails the 2-month rule.
+    """
+    from ingestion.transaction_store import TransactionStore
+    from domain import Transaction
+
+    store = TransactionStore(str(tmp_path / "one_month.db"))
+    for i in range(20):
+        store.insert([Transaction(
+            date=date(2026, 1, i + 1),
+            merchant="Swiggy",
+            amount=500.0 + i,
+            category="Dining",
+            source_file="test.csv",
+        )])
+    return store
+
+
+def _store_two_months(tmp_path: Path) -> object:
+    """Store with 16 expense days spanning January + February 2026.
+
+    Passes both the 14-day guard (16 >= 14) and the 2-month rule (Jan + Feb).
+    """
+    from ingestion.transaction_store import TransactionStore
+    from domain import Transaction
+
+    store = TransactionStore(str(tmp_path / "two_months.db"))
+    for i in range(16):
+        store.insert([Transaction(
+            date=date(2026, 1, 20) + timedelta(days=i),
+            merchant="FreshMart",
+            amount=1200.0 + i,
+            category="Groceries",
             source_file="test.csv",
         )])
     return store
@@ -292,3 +340,76 @@ class TestForecastAggregateHorizonValidation:
     def test_horizon_366_returns_422(self, client):
         resp = client.get("/forecast/aggregate", params={"days": 366})
         assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# TEST 6 — 2-month minimum history rule via HTTP
+# ---------------------------------------------------------------------------
+
+class TestForecastAggregateTwoMonthRule:
+    """Verify the 2-month product rule is enforced at the API level.
+
+    These tests exercise the exact scenario the product requirement describes:
+    a user uploads one month of statements and must see a 422, while a user
+    with two months gets a 200.
+    """
+
+    def test_one_month_14_plus_days_returns_422(self, tmp_path):
+        """20 expense days all in January → 14-day guard passes, 2-month guard fails → 422."""
+        client = _make_client(_store_one_month_only(tmp_path))
+        resp = client.get("/forecast/aggregate")
+        assert resp.status_code == 422, (
+            f"Expected 422 for single-month data, got {resp.status_code}: {resp.text}"
+        )
+
+    def test_one_month_422_detail_mentions_month(self, tmp_path):
+        """The 422 detail for single-month data must mention 'month'."""
+        client = _make_client(_store_one_month_only(tmp_path))
+        body = client.get("/forecast/aggregate").json()
+        assert "detail" in body
+        assert "month" in body["detail"].lower(), (
+            f"Expected 'month' in detail, got: {body['detail']!r}"
+        )
+
+    def test_two_months_with_enough_days_returns_200(self, tmp_path):
+        """16 days spanning Jan + Feb → both guards pass → 200."""
+        client = _make_client(_store_two_months(tmp_path))
+        resp = client.get("/forecast/aggregate")
+        assert resp.status_code == 200, (
+            f"Expected 200 for 2-month data, got {resp.status_code}: {resp.text}"
+        )
+
+    def test_two_months_response_is_valid_forecast(self, tmp_path):
+        """The 2-month success response must contain valid ForecastDTO data."""
+        client = _make_client(_store_two_months(tmp_path))
+        body = client.get("/forecast/aggregate").json()
+        assert body["category"] == "Total Expenses"
+        assert body["horizon_days"] == 30
+        assert len(body["points"]) == 30
+
+    def test_income_in_second_month_does_not_satisfy_rule(self, tmp_path):
+        """Salary Credit in Feb must not count as a second expense month."""
+        from ingestion.transaction_store import TransactionStore
+        from domain import Transaction
+
+        store = TransactionStore(str(tmp_path / "income_feb.db"))
+        # 20 Jan expense days
+        for i in range(20):
+            store.insert([Transaction(
+                date=date(2026, 1, i + 1), merchant="Amazon",
+                amount=1000.0, category="Shopping", source_file="test.csv",
+            )])
+        # 5 Feb income rows
+        for i in range(5):
+            store.insert([Transaction(
+                date=date(2026, 2, i + 1), merchant="Salary Credit",
+                amount=65000.0, category="Other", source_file="test.csv",
+            )])
+
+        client = _make_client(store)
+        resp = client.get("/forecast/aggregate")
+        assert resp.status_code == 422, (
+            "Income in Feb must not satisfy the 2-month expense requirement"
+        )
+        body = resp.json()
+        assert "month" in body["detail"].lower()
