@@ -325,19 +325,31 @@ def _next_month_forecast(
 ) -> None:
     """Render the Next-Month Spending Forecast section.
 
-    Calls /forecast/aggregate to get a 30-day total-expense forecast that
-    excludes income transactions.  Uses the existing ForecastDTO response
-    schema and the same EWMA + linear trend algorithm as the Forecast page.
+    Calls /forecast/aggregate/next-month so the prediction always covers
+    the next complete calendar month (e.g. 1–30 Nov 2026) rather than a
+    rolling 30-day window from the last transaction.  The backend determines
+    the target month from today's date.
 
-    Shows KPI cards (predicted total, avg daily, horizon) plus a line chart
-    with confidence bounds.  If there is insufficient history the backend
-    returns a 422 which is shown as a user-friendly message.
+    Shows the month name, predicted total, avg daily spend, and a line chart
+    with 95% confidence bounds.  If history is insufficient the backend
+    returns 422 with a clear message.
     """
+    from datetime import date
+    from calendar import month_name as _month_name
+
+    # Compute the target month label locally so the spinner text is informative
+    # without requiring an extra API call.
+    _today = date.today()
+    _target_month = _today.month + 1
+    _target_year = _today.year + (1 if _target_month > 12 else 0)
+    _target_month = 1 if _target_month > 12 else _target_month
+    _period_label = f"{_month_name[_target_month]} {_target_year}"
+
     st.subheader("📈 Next-Month Spending Forecast")
 
-    with st.spinner(f"Generating {_FORECAST_DAYS}-day total expense forecast…"):
+    with st.spinner(f"Generating forecast for {_period_label}…"):
         try:
-            forecast = client.get_forecast_aggregate(_FORECAST_DAYS)
+            forecast = client.get_forecast_aggregate_next_month()
         except RuntimeError as exc:
             err = str(exc)
             if "422" in err:
@@ -373,12 +385,21 @@ def _next_month_forecast(
 
     predicted_total = df["yhat"].sum()
     avg_daily = df["yhat"].mean() if len(df) else 0.0
-    horizon = forecast.get("horizon_days", _FORECAST_DAYS)
+    horizon = forecast.get("horizon_days", len(df))
+
+    # Build the display period from the actual forecast dates
+    first_date = df["date"].iloc[0].date() if not df.empty else None
+    last_date = df["date"].iloc[-1].date() if not df.empty else None
+    period_str = (
+        f"{first_date.strftime('%d %b')} – {last_date.strftime('%d %b %Y')}"
+        if first_date and last_date
+        else _period_label
+    )
 
     k1, k2, k3 = st.columns(3)
     k1.metric("Predicted Total Spend", f"₹{predicted_total:,.2f}")
     k2.metric("Avg Daily Spend", f"₹{avg_daily:,.2f}")
-    k3.metric("Forecast Period", f"{horizon} days")
+    k3.metric("Forecast Period", period_str)
 
     chart_df = (
         df[["date", "yhat", "yhat_lower", "yhat_upper"]]
@@ -393,7 +414,8 @@ def _next_month_forecast(
     )
     st.line_chart(chart_df, use_container_width=True)
     st.caption(
-        f"Total expense spending forecast for the next {horizon} days. "
+        f"Estimated total expense spending for **{_period_label}** "
+        f"({horizon} days). "
         "Shaded bounds show the 95% confidence interval."
     )
 

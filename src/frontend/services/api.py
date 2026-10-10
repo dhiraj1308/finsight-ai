@@ -346,6 +346,27 @@ class APIClient:
 
         return self._get(f"/forecast/{category}", params={"days": days})
 
+    def get_forecast_aggregate_next_month(self) -> dict[str, Any]:
+        """Retrieve a forecast for the next complete calendar month from
+        ``/forecast/aggregate/next-month``.
+
+        The backend determines the target month from today's date.  The
+        response contains exactly the number of points equal to the days in
+        that month (28–31) and ``horizon_days`` reflects this count.
+
+        Returns
+        -------
+        dict
+            Parsed :class:`ForecastDTO` payload with ``category='Total Expenses'``,
+            ``horizon_days``, and ``points``.
+
+        Raises
+        ------
+        RuntimeError
+            On network or server errors (including insufficient history).
+        """
+        return self._get("/forecast/aggregate/next-month")
+
     def get_forecast_aggregate(self, days: int = 30) -> dict[str, Any]:
         """
         Retrieve a total-expense spending forecast from ``/forecast/aggregate``.

@@ -509,14 +509,14 @@ class TestSpendingBehavior:
 # ---------------------------------------------------------------------------
 
 class TestNextMonthForecast:
-    """Verify _next_month_forecast() uses get_forecast_aggregate and handles all states."""
+    """Verify _next_month_forecast() uses get_forecast_aggregate_next_month."""
 
     def _make_client(self, forecast_result=None, raises=None):
         client = MagicMock()
         if raises is not None:
-            client.get_forecast_aggregate.side_effect = raises
+            client.get_forecast_aggregate_next_month.side_effect = raises
         else:
-            client.get_forecast_aggregate.return_value = forecast_result
+            client.get_forecast_aggregate_next_month.return_value = forecast_result
         return client
 
     def _call_forecast(self, client):
@@ -539,21 +539,22 @@ class TestNextMonthForecast:
             "category": "Total Expenses",
             "horizon_days": 30,
             "points": [
-                {"date": f"2026-10-{i+1:02d}", "yhat": 1800.0,
+                {"date": f"2026-11-{i+1:02d}", "yhat": 1800.0,
                  "yhat_lower": 1500.0, "yhat_upper": 2100.0}
                 for i in range(3)
             ],
         }
 
-    def test_calls_get_forecast_aggregate(self):
-        """Dashboard must call get_forecast_aggregate, not get_forecast(category)."""
+    def test_calls_get_forecast_aggregate_next_month(self):
+        """Dashboard must call get_forecast_aggregate_next_month (no args)."""
         client = self._make_client(forecast_result=self._sample_forecast())
         self._call_forecast(client)
-        client.get_forecast_aggregate.assert_called_once_with(30)
+        client.get_forecast_aggregate_next_month.assert_called_once_with()
+        client.get_forecast_aggregate.assert_not_called()
         client.get_forecast.assert_not_called()
 
     def test_shows_kpi_and_chart_on_success(self):
-        """Successful aggregate forecast must render metric cards and a line chart."""
+        """Successful forecast must render metric cards and a line chart."""
         client = self._make_client(forecast_result=self._sample_forecast())
         mock_st = self._call_forecast(client)
         mock_st.line_chart.assert_called_once()
@@ -829,9 +830,9 @@ class TestNextMonthForecastMessageBranching:
     backend guard fired (2-month rule vs 14-day rule)."""
 
     def _make_client_raising(self, error_message: str):
-        """Return a mock API client whose get_forecast_aggregate raises RuntimeError."""
+        """Return a mock API client whose get_forecast_aggregate_next_month raises RuntimeError."""
         client = MagicMock()
-        client.get_forecast_aggregate.side_effect = RuntimeError(error_message)
+        client.get_forecast_aggregate_next_month.side_effect = RuntimeError(error_message)
         return client
 
     def _call_forecast(self, client):

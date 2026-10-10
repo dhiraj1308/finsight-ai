@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import calendar
 import logging
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -16,6 +17,46 @@ MIN_HISTORY_DAYS = 14
 MIN_HISTORY_MONTHS = 2
 MIN_HORIZON_DAYS = 1
 MAX_HORIZON_DAYS = 365
+
+# ---------------------------------------------------------------------------
+# Calendar-month helper
+# ---------------------------------------------------------------------------
+
+def next_calendar_month_range(today: date) -> tuple[date, date]:
+    """Return (first_day, last_day) of the calendar month after *today*.
+
+    Handles year boundaries and variable month lengths (28/29/30/31 days).
+
+    Parameters
+    ----------
+    today:
+        Reference date.  Typically ``date.today()`` at call time.
+
+    Returns
+    -------
+    tuple[date, date]
+        First and last day of the next calendar month, inclusive.
+
+    Examples
+    --------
+    >>> next_calendar_month_range(date(2026, 10, 9))
+    (date(2026, 11, 1), date(2026, 11, 30))
+    >>> next_calendar_month_range(date(2026, 12, 31))
+    (date(2027, 1, 1), date(2027, 1, 31))
+    >>> next_calendar_month_range(date(2027, 1, 20))   # Feb non-leap
+    (date(2027, 2, 1), date(2027, 2, 28))
+    >>> next_calendar_month_range(date(2028, 1, 20))   # Feb leap
+    (date(2028, 2, 1), date(2028, 2, 29))
+    """
+    month = today.month + 1
+    year = today.year
+    if month > 12:
+        month = 1
+        year += 1
+    first_day = date(year, month, 1)
+    last_day = date(year, month, calendar.monthrange(year, month)[1])
+    return first_day, last_day
+
 
 # ---------------------------------------------------------------------------
 # Income-keyword filter — mirrors frontend.views.dashboard._INCOME_KEYWORDS.
@@ -265,6 +306,109 @@ class Forecaster:
         points = []
         for i in range(horizon_days):
             forecast_date = last_date + timedelta(days=i + 1)
+            yhat = float(point_estimates[i])
+            points.append(
+                ForecastPoint(
+                    date=forecast_date,
+                    yhat=yhat,
+                    yhat_lower=max(0.0, yhat - margin),
+                    yhat_upper=yhat + margin,
+                )
+            )
+
+        return Forecast(
+            category="Total Expenses",
+            horizon_days=horizon_days,
+            points=points,
+        )
+
+    def forecast_aggregate_next_month(
+        self,
+        store: TransactionStore,
+        *,
+        today: date | None = None,
+    ) -> Forecast:
+        """Forecast total expense spending for the next complete calendar month.
+
+        Applies the same eligibility guards as ``forecast_aggregate`` (14
+        distinct expense days, 2 distinct calendar months), then generates one
+        daily prediction for every day in the next calendar month relative to
+        *today* (defaults to ``date.today()``).
+
+        The forecast dates are exactly ``[first_day … last_day]`` of the next
+        calendar month, so the returned ``horizon_days`` equals the number of
+        days in that month (28, 29, 30, or 31).
+
+        Parameters
+        ----------
+        store:
+            The transaction store to read history from.
+        today:
+            Override for the reference date.  Defaults to ``date.today()``.
+            Exposed for testing.
+
+        Returns
+        -------
+        Forecast
+            ``category="Total Expenses"``, ``horizon_days`` = days in next
+            month, one ``ForecastPoint`` per day.
+
+        Raises
+        ------
+        ValueError
+            If eligibility guards fail (no expenses, < 14 distinct expense
+            days, or < 2 distinct expense months).
+        """
+        if today is None:
+            today = date.today()
+
+        first_day, last_day = next_calendar_month_range(today)
+        horizon_days = (last_day - first_day).days + 1
+
+        all_txns = store.get_all()
+        expense_txns = [
+            t for t in all_txns
+            if not any(kw in t.merchant.lower() for kw in _INCOME_KEYWORDS)
+        ]
+
+        if not expense_txns:
+            raise ValueError(
+                "No expense transactions found. "
+                "Upload a bank statement to enable forecasting."
+            )
+
+        # Aggregate by calendar date
+        daily: dict[date, float] = {}
+        for txn in expense_txns:
+            daily[txn.date] = daily.get(txn.date, 0.0) + txn.amount
+
+        df = pd.DataFrame(
+            [{"ds": d, "y": total} for d, total in daily.items()]
+        ).sort_values("ds").reset_index(drop=True)
+
+        if len(df) < MIN_HISTORY_DAYS:
+            raise ValueError(
+                f"Only {len(df)} distinct calendar days of expense history found. "
+                f"At least {MIN_HISTORY_DAYS} are required."
+            )
+
+        distinct_months = len({(d.year, d.month) for d in df["ds"]})
+        if distinct_months < MIN_HISTORY_MONTHS:
+            raise ValueError(
+                f"Expense history spans only {distinct_months} calendar month(s). "
+                f"At least {MIN_HISTORY_MONTHS} months are required for forecasting. "
+                "Upload statements from at least 2 different months."
+            )
+
+        y = df["y"].values.astype(float)
+        point_estimates, std = self._ewma_with_trend(y, horizon_days)
+
+        z95 = 1.96
+        margin = z95 * std
+
+        points = []
+        for i in range(horizon_days):
+            forecast_date = first_day + timedelta(days=i)
             yhat = float(point_estimates[i])
             points.append(
                 ForecastPoint(
